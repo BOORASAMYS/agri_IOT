@@ -174,7 +174,7 @@ const AgricultureDashboard = ({ controlValues = {} }) => {
   ];
 
   const StatusChip = ({ on, label }) => (
-    <span style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '14px', fontWeight: 700, color: on ? '#16a34a' : '#94a3b8' }}>
+    <span style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '20px', fontWeight: 700, color: on ? '#16a34a' : '#94a3b8' }}>
       <span className="dot" style={{ background: on ? '#22c55e' : '#cbd5e1' }}></span>
       {label}
     </span>
@@ -221,7 +221,7 @@ const AgricultureDashboard = ({ controlValues = {} }) => {
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="2" y="3" width="20" height="14" rx="2"/></svg>
           {title}
           <span className="dot" style={{ marginLeft: 'auto', background: data.irrigation ? '#22c55e' : '#cbd5e1' }}></span>
-          <span style={{ fontSize: '14px', color: data.irrigation ? '#16a34a' : '#94a3b8' }}>{data.irrigation ? 'Irrigating' : 'Idle'}</span>
+          <span style={{ fontSize: '20px', color: data.irrigation ? '#16a34a' : '#94a3b8' }}>{data.irrigation ? 'Irrigating' : 'Idle'}</span>
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: 'minmax(190px, 1.45fr) minmax(90px, 0.8fr) minmax(120px, 1fr)', columnGap: '8px', rowGap: '14px', alignItems: 'start' }}>
           <div className="col">
@@ -267,7 +267,7 @@ const AgricultureDashboard = ({ controlValues = {} }) => {
           <div className="col" style={{ width: '100%' }}>
             <div style={{ width: '100%', fontSize: '10px', color: '#475569', fontWeight: 700, display: 'flex', justifyContent: 'space-between' }}><span>0</span><span>7</span><span>14</span></div>
             <div className="ph-track"><div className="ph-dot" style={{ left: `${phPct}%` }}></div></div>
-            <div style={{ textAlign: 'center', fontSize: '14px', fontWeight: '900', color: phColor(data.ph) }}>pH {data.ph.toFixed(2)}</div>
+            <div style={{ textAlign: 'center', fontSize: '20px', fontWeight: '900', color: phColor(data.ph) }}>pH {data.ph.toFixed(2)}</div>
             <span className="lbl">pH</span>
           </div>
         </div>
@@ -275,7 +275,7 @@ const AgricultureDashboard = ({ controlValues = {} }) => {
           <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
             {[ {l:'N', v:data.n, c:'#22c55e'}, {l:'P', v:data.p, c:'#f59e0b'}, {l:'K', v:data.k, c:'#8b5cf6'} ].map(item => (
                <div key={item.l} style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px' }}>
-                <span style={{ color: item.c, fontSize: '14px', fontWeight: 900, width: '50px' }}>{item.l}</span>
+                <span style={{ color: item.c, fontSize: '20px', fontWeight: 900, width: '50px' }}>{item.l}</span>
                  <div className="npk-track"><div className="npk-fill" style={{ width: `${item.v}%`, background: item.c }}></div></div>
                  <span style={{ color: '#334155', fontSize: '17px', fontWeight: 700, width: '36px', textAlign: 'right', lineHeight: 1 }}>{item.v}</span>
                </div>
@@ -343,7 +343,7 @@ const AgricultureDashboard = ({ controlValues = {} }) => {
           display: flex; 
           align-items: center; 
           gap: 15px; 
-          font-size: 14px; 
+          font-size: 20px; 
           font-weight: 500; 
           box-shadow: 0 2px 8px rgba(13,148,136,0.18); 
         }
@@ -378,15 +378,15 @@ const AgricultureDashboard = ({ controlValues = {} }) => {
         }
         .overview-grid {
           display: grid;
-          grid-template-columns: repeat(2, minmax(0, 1fr));
+          grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.8fr);
           gap: 18px;
           height: 100%;
           align-items: stretch;
           width: 100%;
         }
         .card { background: #ffffff; border: 1px solid #e2e8f0; border-radius: 14px; padding: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.07); min-height: 276px; height: 100%; min-width: 0; }
-        .ctitle { font-size: 15px; font-weight: 700; color: #0d9488; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
-        .lbl { font-size: 14px; font-weight: 900; color: #94a3b8; text-align: center; margin-top: 4px; }
+        .ctitle { font-size: 22px; font-weight: 700; color: #0d9488; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+        .lbl { font-size: 20px; font-weight: 900; color: #94a3b8; text-align: center; margin-top: 4px; }
         .val { font-size: 17px; font-weight: 700; color: #1e293b; text-align: center; line-height: 1.2; }
         .col { display: flex; flex-direction: column; align-items: center; gap: 6px; min-width: 0; }
         .row { display: flex; align-items: center; gap: 9px; }
@@ -539,13 +539,21 @@ const AgricultureDashboard = ({ controlValues = {} }) => {
           height: 92px;
           display: flex;
           align-items: flex-start;
-          justify-content: flex-start;
+          justify-content: center;
           overflow: visible;
-          margin-left: -18px;
+          margin-left: 0;
         }
         .water-level-indicator-inner {
+          position: relative;
+          width: 50px;
           transform: scale(1.16);
           transform-origin: top center;
+          justify-content: center;
+        }
+        .water-level-indicator-inner .water-scale.compact {
+          position: absolute;
+          left: calc(100% + 6px);
+          top: 0;
         }
         .gauge-arc { fill: none; stroke-linecap: round; transition: stroke-dashoffset 1.2s cubic-bezier(0.4, 0, 0.2, 1); }
         .npk-track { flex: 1; height: 5px; background: #e2e8f0; border-radius: 3px; overflow: hidden; }
@@ -665,7 +673,7 @@ const AgricultureDashboard = ({ controlValues = {} }) => {
               <div className={`pipe ${!state.pumping ? 'pipe-stopped' : ''}`}><div className="pipe-flow"></div></div>
               <div className="col">
                 <div className="tank-meter">
-                  <div className="tank-outer" style={{ width: '50px', height: '80px' }}>
+                  <div className="tank-outer" style={{ width: '64px', height: '104px' }}>
                     <AnimatedWaterFill height={`${state.tank.toFixed(1)}%`} label={`${Math.round(state.tank)}%`} />
                   </div>
                   <WaterScale ticks={mainTankScaleTicks} />
@@ -674,9 +682,9 @@ const AgricultureDashboard = ({ controlValues = {} }) => {
               </div>
             </div>
             <div style={{ marginTop: '14px', borderTop: '0.5px solid #f1f5f9', paddingTop: '8px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
-              <div className="stat-row"><span style={{ fontSize: '14px', fontWeight: 700, color: '#64748b' }}>Flow rate</span><span style={{ fontWeight: 500, color: '#0369a1' }}>{state.flowRate.toFixed(1)} L/min</span></div>
-              <div className="stat-row"><span style={{ fontSize: '14px', fontWeight: 700, color: '#64748b' }}>Fill time</span><span style={{ fontWeight: 500, color: '#0369a1' }}>{state.pumping ? (remTime > 0 ? `~${remTime}s` : 'Full') : 'Stopped'}</span></div>
-              <div className="stat-row" style={{ border: 'none' }}><span style={{ fontSize: '14px', fontWeight: 700, color: '#64748b' }}>Pump status</span><span className="badge" style={{ background: state.pumping ? '#dbeafe' : '#f1f5f9', color: state.pumping ? '#1e40af' : '#475569' }}>{state.pumping ? 'Active' : 'Idle'}</span></div>
+              <div className="stat-row"><span style={{ fontSize: '20px', fontWeight: 700, color: '#64748b' }}>Flow rate</span><span style={{ fontWeight: 500, color: '#0369a1' }}>{state.flowRate.toFixed(1)} L/min</span></div>
+              <div className="stat-row"><span style={{ fontSize: '20px', fontWeight: 700, color: '#64748b' }}>Fill time</span><span style={{ fontWeight: 500, color: '#0369a1' }}>{state.pumping ? (remTime > 0 ? `~${remTime}s` : 'Full') : 'Stopped'}</span></div>
+              <div className="stat-row" style={{ border: 'none' }}><span style={{ fontSize: '20px', fontWeight: 700, color: '#64748b' }}>Pump status</span><span className="badge" style={{ background: state.pumping ? '#dbeafe' : '#f1f5f9', color: state.pumping ? '#1e40af' : '#475569' }}>{state.pumping ? 'Active' : 'Idle'}</span></div>
             </div>
           </div>
 
@@ -723,28 +731,28 @@ const AgricultureDashboard = ({ controlValues = {} }) => {
                   </div>
                   <div>
                     <div style={{ fontSize: '17px', fontWeight: 600, color: greenhouseTempColor }}>{state.gh.temp.toFixed(1)}°C</div>
-                    <div style={{ fontSize: '14px', fontWeight: 900, color: '#94a3b8' }}>Temperature</div>
+                    <div style={{ fontSize: '20px', fontWeight: 900, color: '#94a3b8' }}>Temperature</div>
                   </div>
                 </div>
                 <div className="row">
                   <svg width="30" height="30" viewBox="0 0 14 20"><path d="M7 1Q11 7 11 12A4 4 0 0 1 3 12Q3 7 7 1Z" fill="#38bdf8"/></svg>
                   <div>
                     <div style={{ fontSize: '17px', fontWeight: 600, color: '#0ea5e9' }}>{Math.round(state.gh.humidity)}%</div>
-                    <div style={{ fontSize: '14px', fontWeight: 900, color: '#94a3b8' }}>Humidity</div>
+                    <div style={{ fontSize: '20px', fontWeight: 900, color: '#94a3b8' }}>Humidity</div>
                   </div>
                 </div>
               </div>
               </div>
               <div style={{ flex: 1, borderTop: '0.5px solid #f1f5f9', paddingTop: '10px', display: 'flex', flexDirection: 'column' }}>
-                <div style={{ fontSize: '14px', fontWeight: 800, color: '#0d9488', marginBottom: '8px' }}>Farm House</div>
+                <div style={{ fontSize: '20px', fontWeight: 800, color: '#0d9488', marginBottom: '8px' }}>Farm House</div>
                 <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', animation: fireOn ? 'blink 0.8s step-end infinite' : 'none' }}>
                   <svg width="40" height="50" viewBox="0 0 20 26">
                     <path d="M10 1Q15 8 15 15A5 5 0 0 1 5 15Q5 8 10 1Z" fill={fireOn ? '#ef4444' : '#94a3b8'}/>
                     <path d="M10 12Q13 15 13 18A3 3 0 0 1 7 18Q7 15 10 12Z" fill={fireOn ? '#ef4444' : '#e2e8f0'}/>
                   </svg>
                   <div>
-                    <div style={{ fontSize: '14px', fontWeight: 900, color: fireOn ? '#dc2626' : '#16a34a' }}>{fireOn ? 'Fire Detected!' : 'Safe'}</div>
-                    <div style={{ fontSize: '14px', fontWeight: 900, color: '#94a3b8' }}>Fire Alert</div>
+                    <div style={{ fontSize: '20px', fontWeight: 900, color: fireOn ? '#dc2626' : '#16a34a' }}>{fireOn ? 'Fire Detected!' : 'Safe'}</div>
+                    <div style={{ fontSize: '20px', fontWeight: 900, color: '#94a3b8' }}>Fire Alert</div>
                   </div>
                 </div>
               </div>

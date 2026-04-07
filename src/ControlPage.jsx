@@ -129,7 +129,9 @@ const ControlCard = ({ title, icon, children, accentClass = '' }) => (
         {title}
       </div>
     </div>
-    {children}
+    <div className="card-body">
+      {children}
+    </div>
   </section>
 );
 
@@ -168,6 +170,8 @@ const ControlPage = ({ controlValues = {}, setControlValues = () => {} }) => {
           width: 100%;
           background: #ffffff;
           padding: 0;
+          font-size: 18px;
+          min-height: calc(100dvh - 110px);
         }
 
         .control-shell {
@@ -175,13 +179,15 @@ const ControlPage = ({ controlValues = {}, setControlValues = () => {} }) => {
           display: grid;
           grid-template-columns: repeat(3, minmax(0, 1fr));
           gap: 12px;
+          min-height: 100%;
+          align-content: space-between;
         }
 
         .control-button {
           border: none;
           border-radius: 10px;
           padding: 9px 12px;
-          font-size: 11px;
+          font-size: 18px;
           font-weight: 800;
           cursor: pointer;
           transition: background 0.2s ease, transform 0.2s ease;
@@ -209,11 +215,15 @@ const ControlPage = ({ controlValues = {}, setControlValues = () => {} }) => {
           padding: 13px 14px;
           box-shadow: 0 1px 6px rgba(0,0,0,0.06);
           min-width: 0;
-          min-height: 224px;
+          height: 100%;
+          display: flex;
+          flex-direction: column;
         }
 
-        .control-card.action-card {
-          min-height: 0;
+        .card-body {
+          flex: 1;
+          display: flex;
+          flex-direction: column;
         }
 
         .card-head {
@@ -221,7 +231,7 @@ const ControlPage = ({ controlValues = {}, setControlValues = () => {} }) => {
         }
 
         .card-title {
-          font-size: 14px;
+          font-size: 22px;
           font-weight: 700;
           color: #0f766e;
           text-transform: uppercase;
@@ -240,7 +250,7 @@ const ControlPage = ({ controlValues = {}, setControlValues = () => {} }) => {
           justify-content: center;
           background: #ecfeff;
           border: 1px solid #bae6fd;
-          font-size: 13px;
+          font-size: 18px;
           line-height: 1;
           flex-shrink: 0;
         }
@@ -249,6 +259,16 @@ const ControlPage = ({ controlValues = {}, setControlValues = () => {} }) => {
           display: flex;
           flex-direction: column;
           gap: 12px;
+        }
+
+        .water-card .control-stack {
+          flex: 1;
+          justify-content: space-between;
+        }
+
+        .greenhouse-card .control-stack {
+          flex: 1;
+          justify-content: space-evenly;
         }
 
         .control-block {
@@ -265,13 +285,13 @@ const ControlPage = ({ controlValues = {}, setControlValues = () => {} }) => {
         }
 
         .control-label {
-          font-size: 12px;
+          font-size: 18px;
           font-weight: 600;
           color: #334155;
         }
 
         .control-value {
-          font-size: 12px;
+          font-size: 18px;
           font-weight: 700;
           color: #0f766e;
         }
@@ -336,13 +356,13 @@ const ControlPage = ({ controlValues = {}, setControlValues = () => {} }) => {
         }
 
         .toggle-label {
-          font-size: 11px;
+          font-size: 18px;
           font-weight: 700;
           color: #334155;
         }
 
         .toggle-state {
-          font-size: 9px;
+          font-size: 18px;
           font-weight: 800;
           letter-spacing: 0.08em;
           color: #64748b;
@@ -385,6 +405,12 @@ const ControlPage = ({ controlValues = {}, setControlValues = () => {} }) => {
           display: flex;
           flex-direction: column;
           gap: 10px;
+          flex: 1;
+          justify-content: space-between;
+        }
+
+        .action-card .control-button {
+          flex: 1;
         }
 
         .inline-action {
@@ -450,6 +476,7 @@ const ControlPage = ({ controlValues = {}, setControlValues = () => {} }) => {
               onChange={(value) => handleSliderChange('humidity', value)}
               formatter={(value) => `${value.toFixed(1)}%`}
             />
+            <br />
           </div>
         </ControlCard>
 
@@ -534,7 +561,7 @@ const ControlPage = ({ controlValues = {}, setControlValues = () => {} }) => {
                 onChange={(value) => handleSliderChange(field.kKey, value)}
                 formatter={(value) => value.toFixed(0)}
               />
-
+              <br />
               <div className="toggle-grid">
                 <ToggleControl
                   label="Irrigation"
