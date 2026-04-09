@@ -43,46 +43,25 @@ const FIELD_CONFIGS = [
     title: 'Field 1 Controls',
     moistureKey: 'f1Moisture',
     phKey: 'f1Ph',
-    wlKey: 'f1Wl',
     nKey: 'f1N',
     pKey: 'f1P',
     kKey: 'f1K',
-    toggleKeys: {
-      irrigation: 'f1Irrigation',
-      drain: 'f1Drain',
-      acid: 'f1Acid',
-      base: 'f1Base',
-    },
   },
   {
     title: 'Field 2 Controls',
     moistureKey: 'f2Moisture',
     phKey: 'f2Ph',
-    wlKey: 'f2Wl',
     nKey: 'f2N',
     pKey: 'f2P',
     kKey: 'f2K',
-    toggleKeys: {
-      irrigation: 'f2Irrigation',
-      drain: 'f2Drain',
-      acid: 'f2Acid',
-      base: 'f2Base',
-    },
   },
   {
     title: 'Field 3 Controls',
     moistureKey: 'f3Moisture',
     phKey: 'f3Ph',
-    wlKey: 'f3Wl',
     nKey: 'f3N',
     pKey: 'f3P',
     kKey: 'f3K',
-    toggleKeys: {
-      irrigation: 'f3Irrigation',
-      drain: 'f3Drain',
-      acid: 'f3Acid',
-      base: 'f3Base',
-    },
   },
 ];
 
@@ -171,7 +150,9 @@ const ControlPage = ({ controlValues = {}, setControlValues = () => {} }) => {
           background: #ffffff;
           padding: 0;
           font-size: 18px;
-          min-height: calc(100dvh - 110px);
+          height: 100%;
+          min-height: 100%;
+          overflow-y: auto;
         }
 
         .control-shell {
@@ -180,7 +161,7 @@ const ControlPage = ({ controlValues = {}, setControlValues = () => {} }) => {
           grid-template-columns: repeat(3, minmax(0, 1fr));
           gap: 12px;
           min-height: 100%;
-          align-content: space-between;
+          align-content: stretch;
         }
 
         .control-button {
@@ -480,17 +461,6 @@ const ControlPage = ({ controlValues = {}, setControlValues = () => {} }) => {
           </div>
         </ControlCard>
 
-        <ControlCard title="Quick Actions" icon="⚙️" accentClass="action-card">
-          <div className="action-stack">
-            <button type="button" className="control-button secondary" onClick={() => applyPreset({ pumping: true, flowRate: 3.4, humidity: 72 })}>
-              Irrigation Boost
-            </button>
-            <button type="button" className="control-button secondary" onClick={() => applyPreset({ pumping: false, flowRate: 0, humidity: 55 })}>
-              Standby Mode
-            </button>
-          </div>
-        </ControlCard>
-
         {FIELD_CONFIGS.map((field) => (
           <ControlCard
             key={field.title}
@@ -518,17 +488,6 @@ const ControlPage = ({ controlValues = {}, setControlValues = () => {} }) => {
                 onChange={(value) => handleSliderChange(field.phKey, value)}
                 formatter={(value) => value.toFixed(2)}
                 accentClass="orange"
-              />
-
-              <SliderControl
-                label="Water Level"
-                value={values[field.wlKey]}
-                min="0"
-                max="30"
-                step="0.1"
-                onChange={(value) => handleSliderChange(field.wlKey, value)}
-                formatter={(value) => value.toFixed(1)}
-                accentClass="blue"
               />
 
               <SliderControl
@@ -561,33 +520,6 @@ const ControlPage = ({ controlValues = {}, setControlValues = () => {} }) => {
                 onChange={(value) => handleSliderChange(field.kKey, value)}
                 formatter={(value) => value.toFixed(0)}
               />
-              <br />
-              <div className="toggle-grid">
-                <ToggleControl
-                  label="Irrigation"
-                  checked={values[field.toggleKeys.irrigation]}
-                  onChange={() => handleToggleChange(field.toggleKeys.irrigation)}
-                  tone="teal"
-                />
-                <ToggleControl
-                  label="Drain"
-                  checked={values[field.toggleKeys.drain]}
-                  onChange={() => handleToggleChange(field.toggleKeys.drain)}
-                  tone="blue"
-                />
-                <ToggleControl
-                  label="Acid Doser"
-                  checked={values[field.toggleKeys.acid]}
-                  onChange={() => handleToggleChange(field.toggleKeys.acid)}
-                  tone="amber"
-                />
-                <ToggleControl
-                  label="Base Doser"
-                  checked={values[field.toggleKeys.base]}
-                  onChange={() => handleToggleChange(field.toggleKeys.base)}
-                  tone="red"
-                />
-              </div>
             </div>
           </ControlCard>
         ))}
