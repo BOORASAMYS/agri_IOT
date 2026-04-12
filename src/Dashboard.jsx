@@ -1,7 +1,17 @@
 import React, { useState, useEffect, useRef } from 'react';
+import cyberLancersLogo from './assets/CyberLancers_Logo.svg';
+import cdacLogo from './assets/cdac-logo.svg';
+import cyberMainSplash from './assets/Cyber_Main.png';
+
+const API_BASE = '/api';
+const FIELD_ENDPOINTS = {
+  f1: `${API_BASE}/fields/f1`,
+  f2: `${API_BASE}/fields/f2`,
+  f3: `${API_BASE}/fields/f3`,
+};
 
 const AgricultureDashboard = () => {
-  const BASE_DASHBOARD_WIDTH = 1360;
+  const BASE_DASHBOARD_WIDTH = 1480;
   // --- INITIAL STATE (Unchanged) ---
   const [state, setState] = useState({
     tank: 100,
@@ -15,15 +25,75 @@ const AgricultureDashboard = () => {
   });
 
   const [isMounted, setIsMounted] = useState(false);
+  const [isLoadingScreenVisible, setIsLoadingScreenVisible] = useState(true);
   const [dashboardHeight, setDashboardHeight] = useState(640);
   const [dashboardScale, setDashboardScale] = useState(1);
+  const [sendStatus, setSendStatus] = useState('Auto-sync is ready. Field updates will be sent to the Python server.');
   const shellRef = useRef(null);
   const dashRef = useRef(null);
+  const lastQueuedPayloadRef = useRef({});
+  const dirtyFieldsRef = useRef({});
+  const lastLocalUpdateRef = useRef(0);
+  const activeEditFieldsRef = useRef({});
 
   // --- INITIALIZE TIME ON CLIENT SIDE AFTER HYDRATION ---
   useEffect(() => {
     setIsMounted(true);
     setState(prevState => ({ ...prevState, time: new Date().toLocaleTimeString() }));
+  }, []);
+
+  useEffect(() => {
+    const timerId = window.setTimeout(() => {
+      setIsLoadingScreenVisible(false);
+    }, 10000);
+
+    return () => {
+      window.clearTimeout(timerId);
+    };
+  }, []);
+
+  useEffect(() => {
+    let isCancelled = false;
+
+    const refreshFromServer = async () => {
+      if (Date.now() - lastLocalUpdateRef.current < 1500) {
+        return;
+      }
+
+      try {
+        const response = await fetch(`${API_BASE}/status`);
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+
+        const payload = await response.json();
+        if (isCancelled || !payload?.state) return;
+
+        setState((prevState) => ({
+          ...prevState,
+          tank: payload.state.tank ?? prevState.tank,
+          pumping: payload.state.pumping ?? prevState.pumping,
+          flowRate: payload.state.flowRate ?? prevState.flowRate,
+          gh: { ...prevState.gh, ...(payload.state.gh || {}) },
+          f1: activeEditFieldsRef.current.f1 ? prevState.f1 : (payload.state.f1 ?? prevState.f1),
+          f2: activeEditFieldsRef.current.f2 ? prevState.f2 : (payload.state.f2 ?? prevState.f2),
+          f3: activeEditFieldsRef.current.f3 ? prevState.f3 : (payload.state.f3 ?? prevState.f3),
+          time: new Date().toLocaleTimeString(),
+        }));
+      } catch (error) {
+        if (!isCancelled) {
+          setSendStatus(`Python server sync failed: ${error.message}`);
+        }
+      }
+    };
+
+    refreshFromServer();
+    const intervalId = window.setInterval(refreshFromServer, 1000);
+
+    return () => {
+      isCancelled = true;
+      window.clearInterval(intervalId);
+    };
   }, []);
 
   useEffect(() => {
@@ -99,6 +169,70 @@ const AgricultureDashboard = () => {
     return { x: event.clientX, y: event.clientY };
   };
 
+  const buildFieldPayload = (fieldKey) => {
+    const field = state[fieldKey];
+
+    return {
+      field: fieldKey,
+      moisture: field.moisture,
+      ph: field.ph,
+      waterLevel: field.wl,
+      n: field.n,
+      p: field.p,
+      k: field.k,
+      irrigation: field.irrigation,
+      drain: field.drain,
+      acid: field.acid,
+      base: field.base,
+    };
+  };
+
+  const sendFieldToServer = async (fieldKey, payload) => {
+    const endpoint = FIELD_ENDPOINTS[fieldKey];
+    if (!endpoint) {
+      setSendStatus(`No Python endpoint configured for ${fieldKey.toUpperCase()}`);
+      return;
+    }
+
+    lastLocalUpdateRef.current = Date.now();
+
+    try {
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+    } catch (error) {
+      setSendStatus(`Failed to send ${fieldKey.toUpperCase()} values: ${error.message}`);
+    }
+  };
+
+  useEffect(() => {
+    ['f1', 'f2', 'f3'].forEach((fieldKey) => {
+      const payload = buildFieldPayload(fieldKey);
+      const serializedPayload = JSON.stringify(payload);
+
+      if (!dirtyFieldsRef.current[fieldKey]) {
+        lastQueuedPayloadRef.current[fieldKey] = serializedPayload;
+        return;
+      }
+
+      if (lastQueuedPayloadRef.current[fieldKey] === serializedPayload) {
+        return;
+      }
+
+      lastQueuedPayloadRef.current[fieldKey] = serializedPayload;
+      dirtyFieldsRef.current[fieldKey] = false;
+      sendFieldToServer(fieldKey, payload);
+    });
+  }, [state.f1, state.f2, state.f3]);
+
   const StatusChip = ({ on, label, onClick, activeColor = '#16a34a' }) => (
     <span
       onClick={onClick}
@@ -144,6 +278,7 @@ const AgricultureDashboard = () => {
     const dragStartRef = useRef({ x: 0, y: 0 });
     const dragArmedRef = useRef(false);
     const pendingFieldPatchRef = useRef({});
+    const patchFrameRef = useRef(null);
     const dragListenersBoundRef = useRef(false);
     const dragCleanupRef = useRef(null);
     const moistureValue = liveField?.moisture ?? data.moisture;
@@ -162,6 +297,8 @@ const AgricultureDashboard = () => {
       { value: 0, position: 0, emphasis: true }
     ];
     const updateField = (patch) => {
+      lastLocalUpdateRef.current = Date.now();
+      dirtyFieldsRef.current[fieldKey] = true;
       setState((prev) => ({
         ...prev,
         [fieldKey]: { ...prev[fieldKey], ...patch },
@@ -169,6 +306,11 @@ const AgricultureDashboard = () => {
     };
     const scheduleFieldPatch = (patch) => {
       pendingFieldPatchRef.current = { ...pendingFieldPatchRef.current, ...patch };
+      if (patchFrameRef.current !== null) return;
+      patchFrameRef.current = window.requestAnimationFrame(() => {
+        patchFrameRef.current = null;
+        flushFieldPatch();
+      });
     };
     const setLivePatch = (patch) => {
       setLiveField((prev) => ({ ...(prev ?? {}), ...patch }));
@@ -213,6 +355,7 @@ const AgricultureDashboard = () => {
       if (activeDragRef.current) {
         endDrag();
       }
+      activeEditFieldsRef.current[fieldKey] = true;
       setLiveField({ moisture: data.moisture, ph: data.ph, n: data.n, p: data.p, k: data.k });
       activeDragRef.current = target;
       dragStartRef.current = { x: startX, y: startY };
@@ -242,6 +385,9 @@ const AgricultureDashboard = () => {
       setDragTarget(null);
       flushFieldPatch();
       setLiveField(null);
+      window.setTimeout(() => {
+        activeEditFieldsRef.current[fieldKey] = false;
+      }, 250);
     };
     const bindGlobalDragListeners = () => {
       if (dragListenersBoundRef.current) return;
@@ -289,6 +435,9 @@ const AgricultureDashboard = () => {
 
     useEffect(() => {
       return () => {
+        if (patchFrameRef.current !== null) {
+          window.cancelAnimationFrame(patchFrameRef.current);
+        }
         endDrag();
         unbindGlobalDragListeners();
       };
@@ -522,6 +671,7 @@ const AgricultureDashboard = () => {
           display: flex;
           justify-content: center;
           align-items: flex-start;
+          position: relative;
           width: 100%;
           height: 100%;
           min-height: 100%;
@@ -544,9 +694,138 @@ const AgricultureDashboard = () => {
 
         .dash {
           width: 100%;
-          min-width: 0;
+          min-width: 1480px;
           max-width: 100%;
           margin: 0;
+        }
+
+        .loading-screen {
+          position: fixed;
+          inset: 0;
+          z-index: 9999;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 24px;
+          background:
+            radial-gradient(circle at center, rgba(20, 184, 166, 0.16) 0%, rgba(255, 255, 255, 0.96) 42%, #ffffff 72%);
+          backdrop-filter: blur(8px);
+        }
+
+        .loading-screen::before {
+          content: '';
+          position: absolute;
+          width: min(70vw, 760px);
+          height: min(70vw, 760px);
+          border-radius: 50%;
+          background: radial-gradient(circle, rgba(14, 165, 233, 0.16) 0%, rgba(45, 212, 191, 0.1) 35%, rgba(255,255,255,0) 72%);
+          filter: blur(14px);
+          animation: splashPulse 2.8s ease-in-out infinite;
+        }
+
+        .loading-card {
+          position: relative;
+          z-index: 1;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          gap: 18px;
+          width: min(100%, 760px);
+        }
+
+        .loading-image {
+          width: min(100%, 680px);
+          height: auto;
+          object-fit: contain;
+          filter: drop-shadow(0 22px 42px rgba(15, 23, 42, 0.14));
+          animation: splashFloat 2.4s ease-in-out infinite;
+        }
+
+        .loading-copy {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          gap: 10px;
+          color: #334155;
+          text-align: center;
+        }
+
+        .loading-title {
+          font-size: 20px;
+          font-weight: 800;
+          letter-spacing: 0.02em;
+          color: #0f172a;
+        }
+
+        .loading-subtitle {
+          font-size: 15px;
+          font-weight: 600;
+          color: #475569;
+        }
+
+        .loading-progress {
+          width: min(320px, 72vw);
+          height: 7px;
+          border-radius: 999px;
+          background: rgba(148, 163, 184, 0.22);
+          overflow: hidden;
+          box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.08);
+        }
+
+        .loading-progress-bar {
+          width: 100%;
+          height: 100%;
+          transform-origin: left center;
+          background: linear-gradient(90deg, #dbeafe 0%, #2563eb 46%, #14b8a6 100%);
+          animation: loadingBar 10s linear forwards;
+        }
+
+        .top-navbar {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 18px;
+          margin-bottom: 14px;
+          padding: 14px 20px;
+          border-radius: 18px;
+          background: linear-gradient(135deg, #0f766e 0%, #0d9488 48%, #14b8a6 100%);
+          box-shadow: 0 12px 28px rgba(13, 148, 136, 0.22);
+        }
+
+        .top-navbar-title {
+          color: #f8fafc;
+          font-size: 30px;
+          font-weight: 900;
+          letter-spacing: 0.01em;
+          text-align: left;
+        }
+
+        .top-navbar-logos {
+          display: flex;
+          align-items: center;
+          justify-content: flex-end;
+          gap: 14px;
+          margin-left: auto;
+          flex-wrap: wrap;
+        }
+
+        .top-navbar-logo-box {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          min-width: 78px;
+          height: 58px;
+          padding: 8px 12px;
+          border-radius: 14px;
+          background: rgba(255, 255, 255, 0.96);
+          box-shadow: inset 0 1px 0 rgba(255,255,255,0.8), 0 5px 16px rgba(15, 23, 42, 0.14);
+        }
+
+        .top-navbar-logo {
+          display: block;
+          max-width: 100%;
+          max-height: 42px;
+          object-fit: contain;
         }
 
         .header { 
@@ -593,8 +872,8 @@ const AgricultureDashboard = () => {
         }
         .overview-grid {
           display: grid;
-          grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.8fr);
-          gap: 18px;
+          grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.95fr);
+          gap: 22px;
           height: 100%;
           align-items: stretch;
           width: 100%;
@@ -628,6 +907,20 @@ const AgricultureDashboard = () => {
           50% { transform: translateX(-16%) translateY(2px); }
           100% { transform: translateX(-24%) translateY(0); }
         }
+        @keyframes splashFloat {
+          0% { transform: translateY(0); }
+          50% { transform: translateY(-8px); }
+          100% { transform: translateY(0); }
+        }
+        @keyframes splashPulse {
+          0% { transform: scale(0.92); opacity: 0.72; }
+          50% { transform: scale(1.02); opacity: 1; }
+          100% { transform: scale(0.92); opacity: 0.72; }
+        }
+        @keyframes loadingBar {
+          0% { transform: scaleX(0); }
+          100% { transform: scaleX(1); }
+        }
         
         .spin-slow { animation: spin 2.5s linear infinite; }
         .spin-med { animation: spin 1s linear infinite; }
@@ -642,6 +935,10 @@ const AgricultureDashboard = () => {
 
         .tank-meter { display: flex; align-items: stretch; gap: 7px; }
         .tank-meter.compact { gap: 6px; }
+        .tank-meter.main-tank-meter {
+          gap: 12px;
+          align-items: center;
+        }
         .tank-outer { border: 2px solid #94a3b8; border-radius: 7px; background: linear-gradient(180deg, #f8fbff 0%, #eef6ff 100%); overflow: hidden; position: relative; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.75); }
         .main-tank-shell {
           border: none;
@@ -697,14 +994,29 @@ const AgricultureDashboard = () => {
           opacity: 0.98;
           background: linear-gradient(180deg, #8fd8ff 0%, #4fc3f7 42%, #1da1f2 100%);
         }
-        .main-tank-water-zone .water-value {
-          font-size: 10px;
-          font-weight: 600;
-          color: #475569;
-          text-shadow: 0 1px 2px rgba(255,255,255,0.85);
+        .main-tank-value {
+          position: absolute;
+          inset: 0;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 22px;
+          font-weight: 800;
+          color: #075985;
+          text-shadow: 0 1px 4px rgba(255,255,255,0.92);
+          z-index: 5;
+          pointer-events: none;
         }
-        .main-tank-shell .main-tank-water-zone .water-value {
+        .main-tank-meter .water-scale {
+          height: 114px;
+          width: 34px;
           font-size: 10px;
+        }
+        .main-tank-meter .scale-line {
+          width: 12px;
+        }
+        .main-tank-meter .scale-tick.emphasis .scale-line {
+          width: 15px;
         }
         .field-tank { width: 50px; height: 80px; border: 1.5px solid #94a3b8; border-radius: 6px; background: linear-gradient(180deg, #f8fbff 0%, #eef6ff 100%); overflow: hidden; position: relative; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.75); }
         .tank-bg-image {
@@ -843,7 +1155,7 @@ const AgricultureDashboard = () => {
           align-items: flex-start;
           justify-content: center;
           overflow: visible;
-          margin-left: -45px;
+          margin-left: -24px;
         }
         .water-level-indicator-inner {
           position: relative;
@@ -1059,12 +1371,40 @@ const AgricultureDashboard = () => {
           .overview-grid {
             grid-template-columns: 1fr;
           }
+          .top-navbar {
+            flex-direction: column;
+            align-items: flex-start;
+          }
+          .top-navbar-logos {
+            width: 100%;
+            justify-content: flex-start;
+            margin-left: 0;
+          }
           .farmhouse-panel {
             padding-left: 0;
             padding-right: 0;
           }
         }
       `}</style>
+
+      {isLoadingScreenVisible ? (
+        <div className="loading-screen" aria-live="polite" aria-busy="true">
+          <div className="loading-card">
+            <img
+              src={cyberMainSplash}
+              alt="Smart Agriculture Model loading screen"
+              className="loading-image"
+            />
+            <div className="loading-copy">
+              <div className="loading-title">Loading Smart Agriculture Model</div>
+              <div className="loading-subtitle">Initializing sensors and preparing live dashboard data...</div>
+              <div className="loading-progress">
+                <div className="loading-progress-bar"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       <div
         className="dash-frame"
@@ -1082,6 +1422,31 @@ const AgricultureDashboard = () => {
             transformOrigin: 'top center',
           }}
         >
+        <div className="top-navbar">
+          <div className="top-navbar-title">Smart Agriculture Model</div>
+          <div className="top-navbar-logos">
+            <div className="top-navbar-logo-box">
+              <img src={cyberLancersLogo} alt="CyberLancers logo" className="top-navbar-logo" />
+            </div>
+            <div className="top-navbar-logo-box">
+              <img src={cdacLogo} alt="CDAC logo" className="top-navbar-logo" />
+            </div>
+          </div>
+        </div>
+        <div
+          style={{
+            marginBottom: '14px',
+            padding: '12px 16px',
+            borderRadius: '14px',
+            background: '#ecfeff',
+            border: '1px solid #a5f3fc',
+            color: '#155e75',
+            fontSize: '16px',
+            fontWeight: 700,
+          }}
+        >
+          {sendStatus}
+        </div>
         <div className="quad-grid">
           <div className="quad-section">
             <div className="overview-grid">
@@ -1130,7 +1495,7 @@ const AgricultureDashboard = () => {
               </div>
               <div className={`pipe ${!state.pumping ? 'pipe-stopped' : ''}`}><div className="pipe-flow"></div></div>
               <div className="col">
-                <div className="tank-meter">
+                <div className="tank-meter main-tank-meter">
                   <div
                     className="tank-outer main-tank-shell"
                     style={{ width: '108px', height: '114px', cursor: 'pointer' }}
@@ -1144,9 +1509,11 @@ const AgricultureDashboard = () => {
                     <div className="main-tank-cap"></div>
                     <div className="main-tank-body"></div>
                     <div className="main-tank-water-zone">
-                      <AnimatedWaterFill height={`${mainTankFillPct.toFixed(1)}%`} label={`${Math.round(state.tank)}%`} />
+                      <AnimatedWaterFill height={`${mainTankFillPct.toFixed(1)}%`} />
+                      <span className="main-tank-value">{Math.round(state.tank)}%</span>
                     </div>
                   </div>
+                  <WaterScale ticks={mainTankScaleTicks} unit="%" />
                 </div>
                 <span className="lbl">Tank</span>
               </div>

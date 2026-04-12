@@ -1,0 +1,51 @@
+{
+  "deviceIp": "192.168.0.20",
+  "connected": false,
+  "lastError": "/status: <urlopen error timed out>; /data: <urlopen error timed out>; /: <urlopen error timed out>",
+  "lastUpdated": "2026-04-12T15:21:10",
+  "state": {
+    "tank": 41,
+    "pumping": false,
+    "flowRate": 0.0,
+    "gh": {
+      "temp": 35,
+      "humidity": 65
+    },
+    "f1": {
+      "moisture": 16.6,
+      "ph": 13.39,
+      "wl": 25.0,
+      "n": 42.0,
+      "p": 4.6,
+      "k": 55.0,
+      "irrigation": false,
+      "drain": true,
+      "acid": false,
+      "base": false
+    },
+    "f2": {
+      "moisture": 27.2,
+      "ph": 8.1,
+      "wl": 13.3,
+      "n": 38.0,
+      "p": 28.0,
+      "k": 48.0,
+      "irrigation": false,
+      "drain": false,
+      "acid": false,
+      "base": false
+    },
+    "f3": {
+      "moisture": 51.9,
+      "ph": 9.94,
+      "wl": 8.5,
+      "n": 30.3,
+      "p": 46.1,
+      "k": 51.5,
+      "irrigation": false,
+      "drain": false,
+      "acid": false,
+      "base": false
+    }
+  }
+}
