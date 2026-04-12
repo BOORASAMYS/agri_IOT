@@ -1,22 +1,22 @@
 {
   "deviceIp": "192.168.0.20",
   "connected": false,
-  "lastError": "/status: HTTP Error 404: Not Found; /data: HTTP Error 404: Not Found; /: HTTP Error 404: Not Found",
-  "lastUpdated": "2026-04-12T20:10:46",
+  "lastError": "",
+  "lastUpdated": "2026-04-12T21:55:25",
   "state": {
     "tank": 41,
     "pumping": true,
     "flowRate": 0.0,
     "gh": {
-      "temp": 33.5,
+      "temp": 41.5,
       "humidity": 65.0,
-      "fanOn": false,
+      "fanOn": true,
       "fireAlert": false
     },
     "f1": {
-      "moisture": 54.4,
+      "moisture": 55.8,
       "ph": 7.0,
-      "wl": 27.8,
+      "wl": 28.5,
       "n": 42.0,
       "p": 35.0,
       "k": 55.0,
@@ -26,25 +26,25 @@
       "base": false
     },
     "f2": {
-      "moisture": 57.6,
+      "moisture": 57.8,
       "ph": 7.0,
-      "wl": 29.4,
+      "wl": 29.5,
       "n": 61.6,
       "p": 28.0,
       "k": 48.0,
-      "irrigation": false,
+      "irrigation": true,
       "drain": false,
       "acid": false,
       "base": false
     },
     "f3": {
-      "moisture": 50.8,
+      "moisture": 39.0,
       "ph": 7.0,
-      "wl": 25.4,
+      "wl": 15.1,
       "n": 22.0,
       "p": 18.0,
       "k": 31.0,
-      "irrigation": true,
+      "irrigation": false,
       "drain": false,
       "acid": false,
       "base": true
