@@ -341,6 +341,7 @@ const AgricultureDashboard = () => {
 
   const FieldCard = ({ data, title, fieldKey }) => {
     const showPhControls = fieldKey !== 'f3';
+    const showChemicalControls = true;
     const [isMoistureDragging, setIsMoistureDragging] = useState(false);
     const [dragTarget, setDragTarget] = useState(null);
     const [liveField, setLiveField] = useState(null);
@@ -767,11 +768,11 @@ const AgricultureDashboard = () => {
             ))}
           </div>
         </div>
-        <div style={{ marginTop: '10px', paddingTop: '9px', borderTop: '0.5px solid #f1f5f9', display: 'grid', gridTemplateColumns: showPhControls ? 'repeat(4, minmax(0, 1fr))' : 'repeat(2, minmax(0, 1fr))', columnGap: '10px', alignItems: 'center' }}>
+        <div style={{ marginTop: '10px', paddingTop: '9px', borderTop: '0.5px solid #f1f5f9', display: 'grid', gridTemplateColumns: showChemicalControls ? 'repeat(4, minmax(0, 1fr))' : 'repeat(2, minmax(0, 1fr))', columnGap: '10px', alignItems: 'center' }}>
           <StatusChip on={irrigationValue} label="Irrigation" activeColor="#3b82f6" onClick={() => updateField({ irrigation: !irrigationValue })} />
           <StatusChip on={data.drain} label="Drain" activeColor="#ef4444" onClick={() => updateField({ drain: !data.drain })} />
-          {showPhControls ? <StatusChip on={data.acid} label="Acid" onClick={() => updateField({ acid: !data.acid })} /> : null}
-          {showPhControls ? <StatusChip on={data.base} label="Base" onClick={() => updateField({ base: !data.base })} /> : null}
+          {showChemicalControls ? <StatusChip on={data.acid} label="Acid" onClick={() => updateField({ acid: !data.acid })} /> : null}
+          {showChemicalControls ? <StatusChip on={data.base} label="Base" onClick={() => updateField({ base: !data.base })} /> : null}
         </div>
       </div>
     );

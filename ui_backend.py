@@ -3,6 +3,7 @@ from http.server import ThreadingHTTPServer
 import json
 import sys
 import threading
+
 from urllib.parse import urlparse
 
 import requests
@@ -21,11 +22,26 @@ from esp32connect import (
     simulation_loop,
 )
 
+try:
+    from Agri_iot import control as modbus_control
+except Exception as import_error:
+    modbus_control = None
+    MODBUS_IMPORT_ERROR = import_error
+else:
+    MODBUS_IMPORT_ERROR = None
+
 ESP_DEVICES = {
     1: "192.168.0.10",
     2: "192.168.0.20",
     3: "192.168.0.30",
     4: "192.168.0.40",
+}
+
+RELAY_COMMANDS = {
+    "main_tank": {True: "r1on", False: "r1off"},
+    "f1": {True: "r2on", False: "r2off"},
+    "f2": {True: "r3on", False: "r3off"},
+    "f3": {True: "r4on", False: "r4off"},
 }
 
 
@@ -121,10 +137,9 @@ def get_esp_payload_from_state(esp_num):
 
     if esp_num == 4:
         return {
-            "level": int(round(state["tank"])),
-            "pump": "on" if state["pumping"] else "off",
-            "ph": int(round(state["gh"]["temp"])),
-            "moisture": int(round(state["gh"]["humidity"])),
+            "temp": int(round(state["gh"]["temp"])),
+            "humid": int(round(state["gh"]["humidity"])),
+            "fan": "on" if state["gh"].get("fanOn") else "off",
         }
 
     raise ValueError("Invalid ESP number")
@@ -134,12 +149,18 @@ def send_to_esp(esp_num, level, pump, ph, moisture):
     if esp_num not in ESP_DEVICES:
         raise ValueError("Invalid ESP number")
 
-    pump = pump.lower()
-    if pump not in {"on", "off"}:
-        raise ValueError("Pump must be 'on' or 'off'")
-
     esp_ip = ESP_DEVICES[esp_num]
-    url = f"http://{esp_ip}/set?level={level}&pump={pump}&ph={ph}&moisture={moisture}"
+    if esp_num == 4:
+        fan = pump.lower()
+        if fan not in {"on", "off"}:
+            raise ValueError("Fan must be 'on' or 'off'")
+        url = f"http://{esp_ip}/set?temp={level}&humid={ph}&fan={fan}"
+    else:
+        pump = pump.lower()
+        if pump not in {"on", "off"}:
+            raise ValueError("Pump must be 'on' or 'off'")
+        url = f"http://{esp_ip}/set?level={level}&pump={pump}&ph={ph}&moisture={moisture}"
+
     response = requests.get(url, timeout=5)
 
     print(f"Sent to ESP{esp_num}: {url}")
@@ -149,6 +170,14 @@ def send_to_esp(esp_num, level, pump, ph, moisture):
 
 def send_current_ui_values(esp_num):
     payload = get_esp_payload_from_state(esp_num)
+    if esp_num == 4:
+        return send_to_esp(
+            esp_num,
+            payload["temp"],
+            payload["fan"],
+            payload["humid"],
+            payload["humid"],
+        )
     return send_to_esp(
         esp_num,
         payload["level"],
@@ -178,6 +207,28 @@ def print_formatted_field(field_key):
     for key, value in field.items():
         print(f"{key:<15} | {value}")
     print(f"{'-'*35}\n")
+
+
+def send_relay_command(command):
+    if modbus_control is None:
+        if MODBUS_IMPORT_ERROR is not None:
+            raise RuntimeError(f"Agri_iot integration unavailable: {MODBUS_IMPORT_ERROR}")
+        raise RuntimeError("Agri_iot integration unavailable")
+    return modbus_control(command)
+
+
+def sync_main_tank_relay():
+    with STATE_LOCK:
+        pumping = bool(CURRENT["state"]["pumping"])
+    return send_relay_command(RELAY_COMMANDS["main_tank"][pumping])
+
+
+def sync_field_relay(field_key):
+    if field_key not in {"f1", "f2", "f3"}:
+        raise ValueError("Invalid field for relay sync")
+    with STATE_LOCK:
+        irrigation_on = bool(CURRENT["state"][field_key]["irrigation"])
+    return send_relay_command(RELAY_COMMANDS[field_key][irrigation_on])
 
 
 def build_patch_from_command(path_tokens, raw_value):
@@ -256,6 +307,12 @@ def handle_terminal_command(command):
         raw_value = parts[-1]
         patch = build_patch_from_command(path_tokens, raw_value)
         update_current(patch, connected=False, last_error="")
+        relay_target = path_tokens[0] if path_tokens and path_tokens[0] in {"f1", "f2", "f3"} else None
+        if relay_target is not None:
+            sync_field_relay(relay_target)
+            sync_main_tank_relay()
+        if path_tokens and path_tokens[0] == "pumping":
+            sync_main_tank_relay()
         print("\nValue updated from terminal")
         print_selected_values()
         return
@@ -385,6 +442,18 @@ class UIBackendHandler(Handler):
             }
 
             try:
+                sync_field_relay(field_key)
+            except Exception as error:
+                response_payload["relayWarning"] = f"Saved locally, but relay sync failed: {error}"
+
+            try:
+                sync_main_tank_relay()
+            except Exception as error:
+                existing_warning = response_payload.get("relayWarning")
+                main_warning = f"Main tank relay sync failed: {error}"
+                response_payload["relayWarning"] = f"{existing_warning}; {main_warning}" if existing_warning else main_warning
+
+            try:
                 payload = get_esp_payload_from_state(esp_num)
                 send_current_ui_values(esp_num)
                 response_payload["esp"]["synced"] = True
@@ -415,6 +484,14 @@ def observer_loop():
                 print(f"\n[AUTO-IRRIGATION] {k.upper()} started because an automatic threshold was crossed.")
             else:
                 print(f"\n[AUTO-SHUTOFF] {k.upper()} stopped after reaching 60% moisture.")
+            try:
+                sync_field_relay(k)
+            except Exception as error:
+                print(f"[RELAY SYNC ERROR] {k.upper()}: {error}")
+            try:
+                sync_main_tank_relay()
+            except Exception as error:
+                print(f"[RELAY SYNC ERROR] MAIN TANK: {error}")
             try:
                 send_current_ui_values(UIBackendHandler.FIELD_TO_ESP[k])
             except Exception as error:
