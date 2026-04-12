@@ -15,15 +15,16 @@ REQUEST_TIMEOUT = 4
 STATE_FILE = os.path.join(os.path.dirname(__file__), "esp32_state.json")
 DEFAULT_DEVICE_IP = "192.168.0.20"
 IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD = 30.0
+IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD = 60.0
 IRRIGATION_PH_LOW_THRESHOLD = 4.0
 IRRIGATION_PH_HIGH_THRESHOLD = 10.0
-IRRIGATION_PH_TOLERANCE = 0.7
 IRRIGATION_PH_TARGET = 7.0
 IRRIGATION_PH_STEP_PER_TICK = 0.1
 GREENHOUSE_FAN_TEMP_THRESHOLD = 40.0
 GREENHOUSE_FAN_HUMIDITY_THRESHOLD = 70.0
 GREENHOUSE_TEMP_MIN = 20.0
 GREENHOUSE_TEMP_OFF_STEP_PER_TICK = 0.5
+SIMULATION_TICK_SECONDS = 4.0
 
 DEFAULT_STATE = {
     "deviceIp": "",
@@ -77,6 +78,7 @@ DEFAULT_STATE = {
 STATE_LOCK = threading.Lock()
 IRRIGATION_END_TIMES = {"f1": None, "f2": None, "f3": None}
 LOW_MOISTURE_LATCHES = {"f1": False, "f2": False, "f3": False}
+PH_CONTROL_LATCHES = {"f1": False, "f2": False, "f3": False}
 
 
 def deep_merge(base, patch):
@@ -133,9 +135,7 @@ def should_auto_irrigate(field_key, field):
         return False
 
     ph_value = number_from_value(field.get("ph"), IRRIGATION_PH_LOW_THRESHOLD)
-    low_ph_trigger = ph_value < (IRRIGATION_PH_LOW_THRESHOLD - IRRIGATION_PH_TOLERANCE)
-    high_ph_trigger = ph_value > (IRRIGATION_PH_HIGH_THRESHOLD + IRRIGATION_PH_TOLERANCE)
-    return low_ph_trigger or high_ph_trigger
+    return ph_value < IRRIGATION_PH_LOW_THRESHOLD or ph_value > IRRIGATION_PH_HIGH_THRESHOLD
 
 
 def apply_greenhouse_rules(state):
@@ -160,9 +160,10 @@ def initialize_irrigation_runtime(state):
             continue
 
         LOW_MOISTURE_LATCHES[field_key] = False
+        PH_CONTROL_LATCHES[field_key] = False
 
         if bool_from_value(field.get("irrigation")):
-            IRRIGATION_END_TIMES[field_key] = now + 30.0
+            IRRIGATION_END_TIMES[field_key] = None
         else:
             IRRIGATION_END_TIMES[field_key] = None
 
@@ -319,7 +320,7 @@ def set_pump_state(ip_address, pump_on, field_key="f1"):
         CURRENT["connected"] = True
         CURRENT["lastError"] = ""
         if pump_on:
-            IRRIGATION_END_TIMES[field_key] = __import__('time').time() + 30.0
+            IRRIGATION_END_TIMES[field_key] = None
         else:
             IRRIGATION_END_TIMES[field_key] = None
         save_state()
@@ -388,20 +389,50 @@ def update_current(patch, connected=None, last_error=None):
             new_irrigation = bool_from_value(field.get("irrigation"))
             old_irrigation = old_irrigations[field_key]
             auto_trigger_active = should_auto_irrigate(field_key, field)
+            moisture_trigger_active = number_from_value(field.get("moisture"), IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD) < IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD
+            ph_trigger_active = (
+                field_key in {"f1", "f2"}
+                and (
+                    number_from_value(field.get("ph"), IRRIGATION_PH_TARGET) < IRRIGATION_PH_LOW_THRESHOLD
+                    or number_from_value(field.get("ph"), IRRIGATION_PH_TARGET) > IRRIGATION_PH_HIGH_THRESHOLD
+                )
+            )
 
             if new_irrigation and not old_irrigation:
-                IRRIGATION_END_TIMES[field_key] = now + 30.0
-                LOW_MOISTURE_LATCHES[field_key] = auto_trigger_active
+                IRRIGATION_END_TIMES[field_key] = None
+                LOW_MOISTURE_LATCHES[field_key] = moisture_trigger_active
+                PH_CONTROL_LATCHES[field_key] = ph_trigger_active
             elif not new_irrigation and old_irrigation:
                 IRRIGATION_END_TIMES[field_key] = None
-                LOW_MOISTURE_LATCHES[field_key] = auto_trigger_active
+                LOW_MOISTURE_LATCHES[field_key] = moisture_trigger_active
+                PH_CONTROL_LATCHES[field_key] = ph_trigger_active
 
-            if not auto_trigger_active:
+            if new_irrigation and number_from_value(field.get("moisture"), 0.0) >= IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD:
+                field["irrigation"] = False
+                IRRIGATION_END_TIMES[field_key] = None
                 LOW_MOISTURE_LATCHES[field_key] = False
-            elif not new_irrigation and not LOW_MOISTURE_LATCHES[field_key]:
+                PH_CONTROL_LATCHES[field_key] = False
+
+            if field_key in {"f1", "f2"} and new_irrigation:
+                current_ph = number_from_value(field.get("ph"), IRRIGATION_PH_TARGET)
+                if current_ph == IRRIGATION_PH_TARGET:
+                    field["irrigation"] = False
+                    IRRIGATION_END_TIMES[field_key] = None
+                    PH_CONTROL_LATCHES[field_key] = False
+
+            if not moisture_trigger_active:
+                LOW_MOISTURE_LATCHES[field_key] = False
+            if not ph_trigger_active:
+                PH_CONTROL_LATCHES[field_key] = False
+
+            if not new_irrigation and (
+                (moisture_trigger_active and not LOW_MOISTURE_LATCHES[field_key])
+                or (ph_trigger_active and not PH_CONTROL_LATCHES[field_key])
+            ):
                 field["irrigation"] = True
-                IRRIGATION_END_TIMES[field_key] = now + 30.0
-                LOW_MOISTURE_LATCHES[field_key] = True
+                IRRIGATION_END_TIMES[field_key] = None
+                LOW_MOISTURE_LATCHES[field_key] = moisture_trigger_active
+                PH_CONTROL_LATCHES[field_key] = ph_trigger_active
 
         merged["state"]["pumping"] = any(merged["state"][field_key]["irrigation"] for field_key in ("f1", "f2", "f3"))
         CURRENT.clear()
@@ -415,7 +446,7 @@ def update_current(patch, connected=None, last_error=None):
 
 def simulation_loop():
     while True:
-        time.sleep(1)
+        time.sleep(SIMULATION_TICK_SECONDS)
         with STATE_LOCK:
             dirty = False
             now = time.time()
@@ -435,27 +466,33 @@ def simulation_loop():
                 if not field:
                     continue
 
-                if field.get("irrigation") and IRRIGATION_END_TIMES.get(field_key) is not None:
-                    if now >= IRRIGATION_END_TIMES[field_key]:
+                if field.get("irrigation"):
+                    if number_from_value(field.get("moisture"), 0.0) >= IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD:
                         field["irrigation"] = False
                         IRRIGATION_END_TIMES[field_key] = None
-                        LOW_MOISTURE_LATCHES[field_key] = should_auto_irrigate(field_key, field)
+                        LOW_MOISTURE_LATCHES[field_key] = False
+                        PH_CONTROL_LATCHES[field_key] = False
                         dirty = True
-
-                if field.get("irrigation"):
+                        continue
                     if field.get("wl", 0) < 30.0:
                         field["wl"] = round(min(30.0, field.get("wl", 0) + 0.5), 1)
                         dirty = True
                     if field.get("moisture", 0) < 100.0:
                         field["moisture"] = round(min(100.0, field.get("moisture", 0) + 1.0), 1)
                         dirty = True
-                    current_ph = number_from_value(field.get("ph"), IRRIGATION_PH_TARGET)
-                    if current_ph < IRRIGATION_PH_TARGET:
-                        field["ph"] = round(min(IRRIGATION_PH_TARGET, current_ph + IRRIGATION_PH_STEP_PER_TICK), 2)
-                        dirty = True
-                    elif current_ph > IRRIGATION_PH_TARGET:
-                        field["ph"] = round(max(IRRIGATION_PH_TARGET, current_ph - IRRIGATION_PH_STEP_PER_TICK), 2)
-                        dirty = True
+                    if field_key in {"f1", "f2"}:
+                        current_ph = number_from_value(field.get("ph"), IRRIGATION_PH_TARGET)
+                        if current_ph < IRRIGATION_PH_TARGET:
+                            field["ph"] = round(min(IRRIGATION_PH_TARGET, current_ph + IRRIGATION_PH_STEP_PER_TICK), 2)
+                            dirty = True
+                        elif current_ph > IRRIGATION_PH_TARGET:
+                            field["ph"] = round(max(IRRIGATION_PH_TARGET, current_ph - IRRIGATION_PH_STEP_PER_TICK), 2)
+                            dirty = True
+                        if number_from_value(field.get("ph"), IRRIGATION_PH_TARGET) == IRRIGATION_PH_TARGET:
+                            field["irrigation"] = False
+                            IRRIGATION_END_TIMES[field_key] = None
+                            PH_CONTROL_LATCHES[field_key] = False
+                            dirty = True
                 else:
                     if field.get("wl", 0) > 0.0:
                         field["wl"] = round(max(0.0, field.get("wl", 0) - 0.1), 1)
@@ -464,12 +501,28 @@ def simulation_loop():
                         field["moisture"] = round(max(0.0, field.get("moisture", 0) - 0.2), 1)
                         dirty = True
 
-                if not should_auto_irrigate(field_key, field):
+                moisture_trigger_active = number_from_value(field.get("moisture"), IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD) < IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD
+                ph_trigger_active = (
+                    field_key in {"f1", "f2"}
+                    and (
+                        number_from_value(field.get("ph"), IRRIGATION_PH_TARGET) < IRRIGATION_PH_LOW_THRESHOLD
+                        or number_from_value(field.get("ph"), IRRIGATION_PH_TARGET) > IRRIGATION_PH_HIGH_THRESHOLD
+                    )
+                )
+
+                if not moisture_trigger_active:
                     LOW_MOISTURE_LATCHES[field_key] = False
-                elif not field.get("irrigation") and not LOW_MOISTURE_LATCHES[field_key]:
+                if not ph_trigger_active:
+                    PH_CONTROL_LATCHES[field_key] = False
+
+                if not field.get("irrigation") and (
+                    (moisture_trigger_active and not LOW_MOISTURE_LATCHES[field_key])
+                    or (ph_trigger_active and not PH_CONTROL_LATCHES[field_key])
+                ):
                     field["irrigation"] = True
-                    IRRIGATION_END_TIMES[field_key] = now + 30.0
-                    LOW_MOISTURE_LATCHES[field_key] = True
+                    IRRIGATION_END_TIMES[field_key] = None
+                    LOW_MOISTURE_LATCHES[field_key] = moisture_trigger_active
+                    PH_CONTROL_LATCHES[field_key] = ph_trigger_active
                     dirty = True
 
             if dirty:

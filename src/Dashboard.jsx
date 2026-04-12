@@ -98,7 +98,7 @@ const AgricultureDashboard = () => {
     };
 
     refreshFromServer();
-    const intervalId = window.setInterval(refreshFromServer, 1000);
+    const intervalId = window.setInterval(refreshFromServer, 4000);
 
     return () => {
       isCancelled = true;
@@ -340,6 +340,7 @@ const AgricultureDashboard = () => {
   );
 
   const FieldCard = ({ data, title, fieldKey }) => {
+    const showPhControls = fieldKey !== 'f3';
     const [isMoistureDragging, setIsMoistureDragging] = useState(false);
     const [dragTarget, setDragTarget] = useState(null);
     const [liveField, setLiveField] = useState(null);
@@ -682,36 +683,36 @@ const AgricultureDashboard = () => {
             <div
               ref={phTrackRef}
               className={`ph-track ${dragTarget === 'ph' ? 'dragging' : ''}`}
-              onPointerDown={(event) => {
+              onPointerDown={showPhControls ? (event) => {
                 event.preventDefault();
                 startDrag({ type: 'ph' }, event.clientX, event.clientY);
                 setPhFromPointer(event.clientX);
                 bindGlobalDragListeners();
-              }}
-              onPointerMove={(event) => {
+              } : undefined}
+              onPointerMove={showPhControls ? (event) => {
                 handlePointerMove('ph', event.clientX, event.clientY);
-              }}
-              onPointerUp={() => {
+              } : undefined}
+              onPointerUp={showPhControls ? () => {
                 if (activeDragRef.current && activeDragRef.current.type === 'ph') {
                   endDrag();
                   unbindGlobalDragListeners();
                 }
-              }}
-              onPointerCancel={() => {
+              } : undefined}
+              onPointerCancel={showPhControls ? () => {
                 if (activeDragRef.current && activeDragRef.current.type === 'ph') {
                   endDrag();
                   unbindGlobalDragListeners();
                 }
-              }}
-              onTouchStart={(event) => {
+              } : undefined}
+              onTouchStart={showPhControls ? (event) => {
                 if (typeof window !== 'undefined' && 'PointerEvent' in window) return;
                 if (!event.touches[0]) return;
                 if (event.cancelable) event.preventDefault();
                 startDrag({ type: 'ph' }, event.touches[0].clientX, event.touches[0].clientY);
                 bindGlobalDragListeners();
-              }}
-              style={{ cursor: dragTarget === 'ph' ? 'grabbing' : 'grab', touchAction: 'none' }}
-              title="Drag to set pH"
+              } : undefined}
+              style={{ cursor: showPhControls ? (dragTarget === 'ph' ? 'grabbing' : 'grab') : 'default', touchAction: showPhControls ? 'none' : 'auto' }}
+              title={showPhControls ? 'Drag to set pH' : 'pH level display'}
             >
               <div className={`ph-dot ${dragTarget === 'ph' ? 'dragging' : ''}`} style={{ left: `${phPct}%` }}></div>
             </div>
@@ -766,11 +767,11 @@ const AgricultureDashboard = () => {
             ))}
           </div>
         </div>
-        <div style={{ marginTop: '10px', paddingTop: '9px', borderTop: '0.5px solid #f1f5f9', display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', columnGap: '10px', alignItems: 'center' }}>
+        <div style={{ marginTop: '10px', paddingTop: '9px', borderTop: '0.5px solid #f1f5f9', display: 'grid', gridTemplateColumns: showPhControls ? 'repeat(4, minmax(0, 1fr))' : 'repeat(2, minmax(0, 1fr))', columnGap: '10px', alignItems: 'center' }}>
           <StatusChip on={irrigationValue} label="Irrigation" activeColor="#3b82f6" onClick={() => updateField({ irrigation: !irrigationValue })} />
           <StatusChip on={data.drain} label="Drain" activeColor="#ef4444" onClick={() => updateField({ drain: !data.drain })} />
-          <StatusChip on={data.acid} label="Acid" onClick={() => updateField({ acid: !data.acid })} />
-          <StatusChip on={data.base} label="Base" onClick={() => updateField({ base: !data.base })} />
+          {showPhControls ? <StatusChip on={data.acid} label="Acid" onClick={() => updateField({ acid: !data.acid })} /> : null}
+          {showPhControls ? <StatusChip on={data.base} label="Base" onClick={() => updateField({ base: !data.base })} /> : null}
         </div>
       </div>
     );

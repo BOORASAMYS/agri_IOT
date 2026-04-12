@@ -1,35 +1,35 @@
 {
   "deviceIp": "192.168.0.20",
   "connected": false,
-  "lastError": "/status: <urlopen error timed out>; /data: <urlopen error timed out>; /: <urlopen error timed out>",
-  "lastUpdated": "2026-04-12T21:58:46",
+  "lastError": "/status: <urlopen error [WinError 10065] A socket operation was attempted to an unreachable host>; /data: <urlopen error [WinError 10065] A socket operation was attempted to an unreachable host>; /: <urlopen error [WinError 10065] A socket operation was attempted to an unreachable host>",
+  "lastUpdated": "2026-04-12T22:55:07",
   "state": {
     "tank": 41,
-    "pumping": false,
+    "pumping": true,
     "flowRate": 0.0,
     "gh": {
-      "temp": 40.0,
+      "temp": 20.0,
       "humidity": 65.0,
       "fanOn": false,
       "fireAlert": false
     },
     "f1": {
-      "moisture": 50.4,
-      "ph": 7.0,
-      "wl": 25.8,
+      "moisture": 57.2,
+      "ph": 3.64,
+      "wl": 10.1,
       "n": 42.0,
       "p": 35.0,
       "k": 55.0,
       "irrigation": false,
-      "drain": true,
+      "drain": false,
       "acid": true,
       "base": false
     },
     "f2": {
-      "moisture": 53.6,
+      "moisture": 33.1,
       "ph": 7.0,
-      "wl": 27.4,
-      "n": 61.6,
+      "wl": 0.0,
+      "n": 38.0,
       "p": 28.0,
       "k": 48.0,
       "irrigation": false,
@@ -38,13 +38,13 @@
       "base": false
     },
     "f3": {
-      "moisture": 33.6,
+      "moisture": 31.8,
       "ph": 7.0,
-      "wl": 12.4,
+      "wl": 15.5,
       "n": 22.0,
       "p": 18.0,
       "k": 31.0,
-      "irrigation": false,
+      "irrigation": true,
       "drain": false,
       "acid": false,
       "base": true

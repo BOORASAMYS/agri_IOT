@@ -414,7 +414,7 @@ def observer_loop():
             if is_running:
                 print(f"\n[AUTO-IRRIGATION] {k.upper()} started because an automatic threshold was crossed.")
             else:
-                print(f"\n[AUTO-SHUTOFF] 30 seconds elapsed for {k.upper()}.")
+                print(f"\n[AUTO-SHUTOFF] {k.upper()} stopped after reaching 60% moisture.")
             try:
                 send_current_ui_values(UIBackendHandler.FIELD_TO_ESP[k])
             except Exception as error:
