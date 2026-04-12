@@ -1,22 +1,22 @@
 {
   "deviceIp": "192.168.0.20",
   "connected": false,
-  "lastError": "",
-  "lastUpdated": "2026-04-12T21:55:25",
+  "lastError": "/status: <urlopen error timed out>; /data: <urlopen error timed out>; /: <urlopen error timed out>",
+  "lastUpdated": "2026-04-12T21:58:46",
   "state": {
     "tank": 41,
-    "pumping": true,
+    "pumping": false,
     "flowRate": 0.0,
     "gh": {
-      "temp": 41.5,
+      "temp": 40.0,
       "humidity": 65.0,
-      "fanOn": true,
+      "fanOn": false,
       "fireAlert": false
     },
     "f1": {
-      "moisture": 55.8,
+      "moisture": 50.4,
       "ph": 7.0,
-      "wl": 28.5,
+      "wl": 25.8,
       "n": 42.0,
       "p": 35.0,
       "k": 55.0,
@@ -26,21 +26,21 @@
       "base": false
     },
     "f2": {
-      "moisture": 57.8,
+      "moisture": 53.6,
       "ph": 7.0,
-      "wl": 29.5,
+      "wl": 27.4,
       "n": 61.6,
       "p": 28.0,
       "k": 48.0,
-      "irrigation": true,
+      "irrigation": false,
       "drain": false,
       "acid": false,
       "base": false
     },
     "f3": {
-      "moisture": 39.0,
+      "moisture": 33.6,
       "ph": 7.0,
-      "wl": 15.1,
+      "wl": 12.4,
       "n": 22.0,
       "p": 18.0,
       "k": 31.0,
