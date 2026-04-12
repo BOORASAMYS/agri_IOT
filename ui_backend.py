@@ -18,6 +18,7 @@ from esp32connect import (
     number_from_value,
     print_field_update,
     update_current,
+    simulation_loop,
 )
 
 ESP_DEVICES = {
@@ -169,11 +170,14 @@ def print_selected_values():
     print(f"  f3Moisture: {values['f3Moisture']} | f3Ph: {values['f3Ph']}")
 
 
-def print_field(field_key):
+def print_formatted_field(field_key):
     field = get_field_values(field_key)
-    print(f"\n{field_key.upper()} values")
+    print(f"\n{'-'*35}")
+    print(f"{field_key.upper()} FIELD         | VALUES")
+    print(f"{'-'*35}")
     for key, value in field.items():
-        print(f"  {key}: {value}")
+        print(f"{key:<15} | {value}")
+    print(f"{'-'*35}\n")
 
 
 def build_patch_from_command(path_tokens, raw_value):
@@ -241,7 +245,7 @@ def handle_terminal_command(command):
             print_selected_values()
             return
         if len(parts) == 2 and parts[1] in {"f1", "f2", "f3"}:
-            print_field(parts[1])
+            print_formatted_field(parts[1])
             return
         raise ValueError("Use 'show' or 'show f1'")
 
@@ -294,6 +298,58 @@ class UIBackendHandler(Handler):
     def do_POST(self):
         parsed = urlparse(self.path)
 
+        if parsed.path == "/api/greenhouse":
+            try:
+                body = self.read_body()
+            except json.JSONDecodeError:
+                self.send_json({"error": "Invalid JSON body"}, status=400)
+                return
+
+            if not isinstance(body, dict):
+                self.send_json({"error": "Invalid greenhouse body"}, status=400)
+                return
+
+            incoming = body.get("values") if isinstance(body.get("values"), dict) else body
+            current_gh = get_ui_state()["gh"]
+            gh_patch = {}
+
+            for key in ("temp", "humidity"):
+                if key in incoming:
+                    gh_patch[key] = number_from_value(incoming[key], current_gh[key])
+
+            for key in ("fireAlert", "fanOn"):
+                if key in incoming:
+                    gh_patch[key] = bool_from_value(incoming[key])
+
+            if not gh_patch:
+                self.send_json({"error": "No greenhouse values provided"}, status=400)
+                return
+
+            update_current({"state": {"gh": gh_patch}}, connected=False, last_error="")
+
+            response_payload = {
+                "ok": True,
+                "saved": True,
+                "greenhouse": CURRENT["state"]["gh"],
+                "esp": {
+                    "number": 4,
+                    "ip": ESP_DEVICES[4],
+                    "synced": False,
+                },
+                "dashboard": CURRENT,
+            }
+
+            try:
+                payload = get_esp_payload_from_state(4)
+                send_current_ui_values(4)
+                response_payload["esp"]["synced"] = True
+                response_payload["esp"]["payload"] = payload
+            except Exception as error:
+                response_payload["warning"] = f"Saved locally, but ESP sync failed: {error}"
+
+            self.send_json(response_payload)
+            return
+
         if parsed.path.startswith("/api/fields/"):
             field_key = parsed.path.rsplit("/", 1)[-1]
             if field_key not in self.FIELD_TO_ESP:
@@ -313,42 +369,57 @@ class UIBackendHandler(Handler):
                 return
 
             update_current({"state": {field_key: field_patch}}, connected=False, last_error="")
-            print_field_update(field_key)
+            print_formatted_field(field_key)
 
             esp_num = self.FIELD_TO_ESP[field_key]
+            response_payload = {
+                "ok": True,
+                "field": field_key,
+                "saved": True,
+                "esp": {
+                    "number": esp_num,
+                    "ip": ESP_DEVICES[esp_num],
+                    "synced": False,
+                },
+                "dashboard": CURRENT,
+            }
+
             try:
                 payload = get_esp_payload_from_state(esp_num)
                 send_current_ui_values(esp_num)
-                self.send_json(
-                    {
-                        "ok": True,
-                        "field": field_key,
-                        "saved": True,
-                        "esp": {
-                            "number": esp_num,
-                            "ip": ESP_DEVICES[esp_num],
-                            "payload": payload,
-                        },
-                        "dashboard": CURRENT,
-                    }
-                )
+                response_payload["esp"]["synced"] = True
+                response_payload["esp"]["payload"] = payload
             except Exception as error:
-                self.send_json(
-                    {
-                        "error": str(error),
-                        "field": field_key,
-                        "saved": True,
-                        "esp": {
-                            "number": esp_num,
-                            "ip": ESP_DEVICES[esp_num],
-                        },
-                        "dashboard": CURRENT,
-                    },
-                    status=502,
-                )
+                response_payload["warning"] = f"Saved locally, but ESP sync failed: {error}"
+
+            self.send_json(response_payload)
             return
 
         super().do_POST()
+
+
+def observer_loop():
+    last_irrigation = {"f1": False, "f2": False, "f3": False}
+    while True:
+        __import__("time").sleep(1)
+        changes = []
+        with STATE_LOCK:
+            for k in ("f1", "f2", "f3"):
+                curr = CURRENT["state"][k]["irrigation"]
+                if last_irrigation[k] != curr:
+                    changes.append((k, curr))
+                last_irrigation[k] = curr
+
+        for k, is_running in changes:
+            if is_running:
+                print(f"\n[AUTO-IRRIGATION] {k.upper()} started because an automatic threshold was crossed.")
+            else:
+                print(f"\n[AUTO-SHUTOFF] 30 seconds elapsed for {k.upper()}.")
+            try:
+                send_current_ui_values(UIBackendHandler.FIELD_TO_ESP[k])
+            except Exception as error:
+                print(f"[ESP SYNC ERROR] {k.upper()}: {error}")
+            print_formatted_field(k)
 
 
 def terminal_loop():
@@ -385,5 +456,8 @@ if __name__ == "__main__":
         threading.Thread(target=terminal_loop, daemon=True).start()
     else:
         print("Interactive terminal commands are disabled because stdin is not attached to a TTY.")
+
+    threading.Thread(target=simulation_loop, daemon=True).start()
+    threading.Thread(target=observer_loop, daemon=True).start()
 
     server.serve_forever()

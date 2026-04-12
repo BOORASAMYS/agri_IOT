@@ -1,33 +1,35 @@
 {
   "deviceIp": "192.168.0.20",
   "connected": false,
-  "lastError": "/status: <urlopen error timed out>; /data: <urlopen error timed out>; /: <urlopen error timed out>",
-  "lastUpdated": "2026-04-12T15:21:10",
+  "lastError": "/status: HTTP Error 404: Not Found; /data: HTTP Error 404: Not Found; /: HTTP Error 404: Not Found",
+  "lastUpdated": "2026-04-12T20:10:46",
   "state": {
     "tank": 41,
-    "pumping": false,
+    "pumping": true,
     "flowRate": 0.0,
     "gh": {
-      "temp": 35,
-      "humidity": 65
+      "temp": 33.5,
+      "humidity": 65.0,
+      "fanOn": false,
+      "fireAlert": false
     },
     "f1": {
-      "moisture": 16.6,
-      "ph": 13.39,
-      "wl": 25.0,
+      "moisture": 54.4,
+      "ph": 7.0,
+      "wl": 27.8,
       "n": 42.0,
-      "p": 4.6,
+      "p": 35.0,
       "k": 55.0,
       "irrigation": false,
       "drain": true,
-      "acid": false,
+      "acid": true,
       "base": false
     },
     "f2": {
-      "moisture": 27.2,
-      "ph": 8.1,
-      "wl": 13.3,
-      "n": 38.0,
+      "moisture": 57.6,
+      "ph": 7.0,
+      "wl": 29.4,
+      "n": 61.6,
       "p": 28.0,
       "k": 48.0,
       "irrigation": false,
@@ -36,16 +38,16 @@
       "base": false
     },
     "f3": {
-      "moisture": 51.9,
-      "ph": 9.94,
-      "wl": 8.5,
-      "n": 30.3,
-      "p": 46.1,
-      "k": 51.5,
-      "irrigation": false,
+      "moisture": 50.8,
+      "ph": 7.0,
+      "wl": 25.4,
+      "n": 22.0,
+      "p": 18.0,
+      "k": 31.0,
+      "irrigation": true,
       "drain": false,
       "acid": false,
-      "base": false
+      "base": true
     }
   }
 }

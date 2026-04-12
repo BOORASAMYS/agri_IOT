@@ -1,6 +1,7 @@
 import json
 import os
 import threading
+import time
 from copy import deepcopy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError, URLError
@@ -13,6 +14,16 @@ PORT = 8000
 REQUEST_TIMEOUT = 4
 STATE_FILE = os.path.join(os.path.dirname(__file__), "esp32_state.json")
 DEFAULT_DEVICE_IP = "192.168.0.20"
+IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD = 30.0
+IRRIGATION_PH_LOW_THRESHOLD = 4.0
+IRRIGATION_PH_HIGH_THRESHOLD = 10.0
+IRRIGATION_PH_TOLERANCE = 0.7
+IRRIGATION_PH_TARGET = 7.0
+IRRIGATION_PH_STEP_PER_TICK = 0.1
+GREENHOUSE_FAN_TEMP_THRESHOLD = 40.0
+GREENHOUSE_FAN_HUMIDITY_THRESHOLD = 70.0
+GREENHOUSE_TEMP_MIN = 20.0
+GREENHOUSE_TEMP_OFF_STEP_PER_TICK = 0.5
 
 DEFAULT_STATE = {
     "deviceIp": "",
@@ -64,6 +75,8 @@ DEFAULT_STATE = {
 }
 
 STATE_LOCK = threading.Lock()
+IRRIGATION_END_TIMES = {"f1": None, "f2": None, "f3": None}
+LOW_MOISTURE_LATCHES = {"f1": False, "f2": False, "f3": False}
 
 
 def deep_merge(base, patch):
@@ -89,6 +102,79 @@ def load_state():
 
 
 CURRENT = load_state()
+
+
+
+
+
+def bool_from_value(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "on", "yes", "running"}
+    return False
+
+
+def number_from_value(value, fallback):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def should_auto_irrigate(field_key, field):
+    moisture = number_from_value(field.get("moisture"), IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD)
+    if moisture < IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD:
+        return True
+
+    if field_key not in {"f1", "f2"}:
+        return False
+
+    ph_value = number_from_value(field.get("ph"), IRRIGATION_PH_LOW_THRESHOLD)
+    low_ph_trigger = ph_value < (IRRIGATION_PH_LOW_THRESHOLD - IRRIGATION_PH_TOLERANCE)
+    high_ph_trigger = ph_value > (IRRIGATION_PH_HIGH_THRESHOLD + IRRIGATION_PH_TOLERANCE)
+    return low_ph_trigger or high_ph_trigger
+
+
+def apply_greenhouse_rules(state):
+    greenhouse = state.get("state", {}).get("gh")
+    if not isinstance(greenhouse, dict):
+        return state
+
+    temp = number_from_value(greenhouse.get("temp"), GREENHOUSE_FAN_TEMP_THRESHOLD)
+    humidity = number_from_value(greenhouse.get("humidity"), GREENHOUSE_FAN_HUMIDITY_THRESHOLD)
+    greenhouse["fanOn"] = (
+        temp > GREENHOUSE_FAN_TEMP_THRESHOLD
+        or humidity > GREENHOUSE_FAN_HUMIDITY_THRESHOLD
+    )
+    return state
+
+
+def initialize_irrigation_runtime(state):
+    now = time.time()
+    for field_key in ("f1", "f2", "f3"):
+        field = state.get("state", {}).get(field_key)
+        if not isinstance(field, dict):
+            continue
+
+        LOW_MOISTURE_LATCHES[field_key] = False
+
+        if bool_from_value(field.get("irrigation")):
+            IRRIGATION_END_TIMES[field_key] = now + 30.0
+        else:
+            IRRIGATION_END_TIMES[field_key] = None
+
+    state["state"]["pumping"] = any(
+        bool_from_value(state.get("state", {}).get(field_key, {}).get("irrigation"))
+        for field_key in ("f1", "f2", "f3")
+    )
+    return state
+
+
+CURRENT = initialize_irrigation_runtime(CURRENT)
+CURRENT = apply_greenhouse_rules(CURRENT)
 
 
 def save_state():
@@ -143,21 +229,7 @@ def http_text(url):
         return response.read().decode("utf-8", errors="replace")
 
 
-def bool_from_value(value):
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return value != 0
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "on", "yes", "running"}
-    return False
 
-
-def number_from_value(value, fallback):
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return fallback
 
 
 def apply_status_payload(payload):
@@ -212,7 +284,6 @@ def apply_status_payload(payload):
 
     if state_patch:
         patch["state"] = state_patch
-
     return patch
 
 
@@ -247,6 +318,10 @@ def set_pump_state(ip_address, pump_on, field_key="f1"):
         CURRENT["state"][field_key]["irrigation"] = pump_on
         CURRENT["connected"] = True
         CURRENT["lastError"] = ""
+        if pump_on:
+            IRRIGATION_END_TIMES[field_key] = __import__('time').time() + 30.0
+        else:
+            IRRIGATION_END_TIMES[field_key] = None
         save_state()
 
     return {"requestedPumpState": pump_value, "deviceResponse": response}
@@ -304,7 +379,31 @@ def print_field_update(field_key):
 
 def update_current(patch, connected=None, last_error=None):
     with STATE_LOCK:
-        merged = deep_merge(CURRENT, patch)
+        now = time.time()
+        old_irrigations = {k: CURRENT["state"].get(k, {}).get("irrigation", False) for k in ("f1", "f2", "f3")}
+        merged = apply_greenhouse_rules(deep_merge(CURRENT, patch))
+
+        for field_key in ("f1", "f2", "f3"):
+            field = merged["state"][field_key]
+            new_irrigation = bool_from_value(field.get("irrigation"))
+            old_irrigation = old_irrigations[field_key]
+            auto_trigger_active = should_auto_irrigate(field_key, field)
+
+            if new_irrigation and not old_irrigation:
+                IRRIGATION_END_TIMES[field_key] = now + 30.0
+                LOW_MOISTURE_LATCHES[field_key] = auto_trigger_active
+            elif not new_irrigation and old_irrigation:
+                IRRIGATION_END_TIMES[field_key] = None
+                LOW_MOISTURE_LATCHES[field_key] = auto_trigger_active
+
+            if not auto_trigger_active:
+                LOW_MOISTURE_LATCHES[field_key] = False
+            elif not new_irrigation and not LOW_MOISTURE_LATCHES[field_key]:
+                field["irrigation"] = True
+                IRRIGATION_END_TIMES[field_key] = now + 30.0
+                LOW_MOISTURE_LATCHES[field_key] = True
+
+        merged["state"]["pumping"] = any(merged["state"][field_key]["irrigation"] for field_key in ("f1", "f2", "f3"))
         CURRENT.clear()
         CURRENT.update(merged)
         if connected is not None:
@@ -313,6 +412,73 @@ def update_current(patch, connected=None, last_error=None):
             CURRENT["lastError"] = last_error
         CURRENT["lastUpdated"] = __import__("datetime").datetime.now().isoformat(timespec="seconds")
         save_state()
+
+def simulation_loop():
+    while True:
+        time.sleep(1)
+        with STATE_LOCK:
+            dirty = False
+            now = time.time()
+            greenhouse = CURRENT.get("state", {}).get("gh")
+            if isinstance(greenhouse, dict):
+                apply_greenhouse_rules(CURRENT)
+                if bool_from_value(greenhouse.get("fanOn")):
+                    current_temp = number_from_value(greenhouse.get("temp"), GREENHOUSE_TEMP_MIN)
+                    next_temp = round(max(GREENHOUSE_TEMP_MIN, current_temp - GREENHOUSE_TEMP_OFF_STEP_PER_TICK), 1)
+                    if next_temp != current_temp:
+                        greenhouse["temp"] = next_temp
+                        dirty = True
+                apply_greenhouse_rules(CURRENT)
+
+            for field_key in ("f1", "f2", "f3"):
+                field = CURRENT.get("state", {}).get(field_key)
+                if not field:
+                    continue
+
+                if field.get("irrigation") and IRRIGATION_END_TIMES.get(field_key) is not None:
+                    if now >= IRRIGATION_END_TIMES[field_key]:
+                        field["irrigation"] = False
+                        IRRIGATION_END_TIMES[field_key] = None
+                        LOW_MOISTURE_LATCHES[field_key] = should_auto_irrigate(field_key, field)
+                        dirty = True
+
+                if field.get("irrigation"):
+                    if field.get("wl", 0) < 30.0:
+                        field["wl"] = round(min(30.0, field.get("wl", 0) + 0.5), 1)
+                        dirty = True
+                    if field.get("moisture", 0) < 100.0:
+                        field["moisture"] = round(min(100.0, field.get("moisture", 0) + 1.0), 1)
+                        dirty = True
+                    current_ph = number_from_value(field.get("ph"), IRRIGATION_PH_TARGET)
+                    if current_ph < IRRIGATION_PH_TARGET:
+                        field["ph"] = round(min(IRRIGATION_PH_TARGET, current_ph + IRRIGATION_PH_STEP_PER_TICK), 2)
+                        dirty = True
+                    elif current_ph > IRRIGATION_PH_TARGET:
+                        field["ph"] = round(max(IRRIGATION_PH_TARGET, current_ph - IRRIGATION_PH_STEP_PER_TICK), 2)
+                        dirty = True
+                else:
+                    if field.get("wl", 0) > 0.0:
+                        field["wl"] = round(max(0.0, field.get("wl", 0) - 0.1), 1)
+                        dirty = True
+                    if field.get("moisture", 0) > 0.0:
+                        field["moisture"] = round(max(0.0, field.get("moisture", 0) - 0.2), 1)
+                        dirty = True
+
+                if not should_auto_irrigate(field_key, field):
+                    LOW_MOISTURE_LATCHES[field_key] = False
+                elif not field.get("irrigation") and not LOW_MOISTURE_LATCHES[field_key]:
+                    field["irrigation"] = True
+                    IRRIGATION_END_TIMES[field_key] = now + 30.0
+                    LOW_MOISTURE_LATCHES[field_key] = True
+                    dirty = True
+
+            if dirty:
+                apply_greenhouse_rules(CURRENT)
+                CURRENT["state"]["pumping"] = any(
+                    CURRENT["state"][field_key]["irrigation"] for field_key in ("f1", "f2", "f3")
+                )
+                CURRENT["lastUpdated"] = __import__("datetime").datetime.now().isoformat(timespec="seconds")
+                save_state()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -450,5 +616,6 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     print(f"ESP32 bridge running on http://127.0.0.1:{PORT}")
     print("Open your React dashboard, enter the ESP32 IP, then use the irrigation button.")
+    threading.Thread(target=simulation_loop, daemon=True).start()
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     server.serve_forever()

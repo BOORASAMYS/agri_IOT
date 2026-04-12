@@ -9,6 +9,10 @@ const FIELD_ENDPOINTS = {
   f2: `${API_BASE}/fields/f2`,
   f3: `${API_BASE}/fields/f3`,
 };
+const GREENHOUSE_ENDPOINT = `${API_BASE}/greenhouse`;
+const DRAG_COMMIT_INTERVAL_MS = 90;
+const GREENHOUSE_FAN_TEMP_THRESHOLD = 40;
+const GREENHOUSE_FAN_HUMIDITY_THRESHOLD = 70;
 
 const AgricultureDashboard = () => {
   const BASE_DASHBOARD_WIDTH = 1480;
@@ -28,13 +32,29 @@ const AgricultureDashboard = () => {
   const [isLoadingScreenVisible, setIsLoadingScreenVisible] = useState(true);
   const [dashboardHeight, setDashboardHeight] = useState(640);
   const [dashboardScale, setDashboardScale] = useState(1);
-  const [sendStatus, setSendStatus] = useState('Auto-sync is ready. Field updates will be sent to the Python server.');
   const shellRef = useRef(null);
   const dashRef = useRef(null);
   const lastQueuedPayloadRef = useRef({});
   const dirtyFieldsRef = useRef({});
+  const dirtyGreenhouseRef = useRef(false);
   const lastLocalUpdateRef = useRef(0);
   const activeEditFieldsRef = useRef({});
+
+  const mergeDashboardState = (payloadState) => {
+    if (!payloadState) return;
+
+    setState((prevState) => ({
+      ...prevState,
+      tank: payloadState.tank ?? prevState.tank,
+      pumping: payloadState.pumping ?? prevState.pumping,
+      flowRate: payloadState.flowRate ?? prevState.flowRate,
+      gh: { ...prevState.gh, ...(payloadState.gh || {}) },
+      f1: activeEditFieldsRef.current.f1 ? prevState.f1 : (payloadState.f1 ?? prevState.f1),
+      f2: activeEditFieldsRef.current.f2 ? prevState.f2 : (payloadState.f2 ?? prevState.f2),
+      f3: activeEditFieldsRef.current.f3 ? prevState.f3 : (payloadState.f3 ?? prevState.f3),
+      time: new Date().toLocaleTimeString(),
+    }));
+  };
 
   // --- INITIALIZE TIME ON CLIENT SIDE AFTER HYDRATION ---
   useEffect(() => {
@@ -69,20 +89,10 @@ const AgricultureDashboard = () => {
         const payload = await response.json();
         if (isCancelled || !payload?.state) return;
 
-        setState((prevState) => ({
-          ...prevState,
-          tank: payload.state.tank ?? prevState.tank,
-          pumping: payload.state.pumping ?? prevState.pumping,
-          flowRate: payload.state.flowRate ?? prevState.flowRate,
-          gh: { ...prevState.gh, ...(payload.state.gh || {}) },
-          f1: activeEditFieldsRef.current.f1 ? prevState.f1 : (payload.state.f1 ?? prevState.f1),
-          f2: activeEditFieldsRef.current.f2 ? prevState.f2 : (payload.state.f2 ?? prevState.f2),
-          f3: activeEditFieldsRef.current.f3 ? prevState.f3 : (payload.state.f3 ?? prevState.f3),
-          time: new Date().toLocaleTimeString(),
-        }));
+        mergeDashboardState(payload.state);
       } catch (error) {
         if (!isCancelled) {
-          setSendStatus(`Python server sync failed: ${error.message}`);
+          console.error(`Python server sync failed: ${error.message}`);
         }
       }
     };
@@ -139,7 +149,9 @@ const AgricultureDashboard = () => {
   };
 
   const remTime = Math.max(0, Math.round((80 - state.tank) / (state.flowRate || 1) * 25));
-  const fanOn = state.gh.fanOn;
+  const fanOn =
+    (state.gh.temp ?? 0) > GREENHOUSE_FAN_TEMP_THRESHOLD ||
+    (state.gh.humidity ?? 0) > GREENHOUSE_FAN_HUMIDITY_THRESHOLD;
   const fireOn = state.gh.fireAlert;
   const fanSpeedClass = fanOn ? "spin-med" : "spin-stop";
   const greenhouseTempPct = Math.min((state.gh.temp / 60) * 100, 100);
@@ -190,7 +202,7 @@ const AgricultureDashboard = () => {
   const sendFieldToServer = async (fieldKey, payload) => {
     const endpoint = FIELD_ENDPOINTS[fieldKey];
     if (!endpoint) {
-      setSendStatus(`No Python endpoint configured for ${fieldKey.toUpperCase()}`);
+      console.error(`No Python endpoint configured for ${fieldKey.toUpperCase()}`);
       return;
     }
 
@@ -205,11 +217,62 @@ const AgricultureDashboard = () => {
         body: JSON.stringify(payload),
       });
 
+      const payloadFromServer = await response.json();
+      mergeDashboardState(payloadFromServer?.dashboard?.state);
+
       if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
+        throw new Error(payloadFromServer?.error || `HTTP ${response.status}`);
+      }
+
+      if (payloadFromServer?.warning) {
+        console.warn(payloadFromServer.warning);
       }
     } catch (error) {
-      setSendStatus(`Failed to send ${fieldKey.toUpperCase()} values: ${error.message}`);
+      dirtyFieldsRef.current[fieldKey] = true;
+      console.error(`Failed to send ${fieldKey.toUpperCase()} values: ${error.message}`);
+    }
+  };
+
+  const buildGreenhousePayload = () => ({
+    temp: state.gh.temp,
+    humidity: state.gh.humidity,
+    fireAlert: state.gh.fireAlert,
+  });
+
+  const updateGreenhouse = (patch) => {
+    lastLocalUpdateRef.current = Date.now();
+    dirtyGreenhouseRef.current = true;
+    setState((prev) => ({
+      ...prev,
+      gh: { ...prev.gh, ...patch },
+    }));
+  };
+
+  const sendGreenhouseToServer = async (payload) => {
+    lastLocalUpdateRef.current = Date.now();
+
+    try {
+      const response = await fetch(GREENHOUSE_ENDPOINT, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      });
+
+      const payloadFromServer = await response.json();
+      mergeDashboardState(payloadFromServer?.dashboard?.state);
+
+      if (!response.ok) {
+        throw new Error(payloadFromServer?.error || `HTTP ${response.status}`);
+      }
+
+      if (payloadFromServer?.warning) {
+        console.warn(payloadFromServer.warning);
+      }
+    } catch (error) {
+      dirtyGreenhouseRef.current = true;
+      console.error(`Failed to send greenhouse values: ${error.message}`);
     }
   };
 
@@ -232,6 +295,15 @@ const AgricultureDashboard = () => {
       sendFieldToServer(fieldKey, payload);
     });
   }, [state.f1, state.f2, state.f3]);
+
+  useEffect(() => {
+    if (!dirtyGreenhouseRef.current) {
+      return;
+    }
+
+    dirtyGreenhouseRef.current = false;
+    sendGreenhouseToServer(buildGreenhousePayload());
+  }, [state.gh]);
 
   const StatusChip = ({ on, label, onClick, activeColor = '#16a34a' }) => (
     <span
@@ -273,22 +345,28 @@ const AgricultureDashboard = () => {
     const [liveField, setLiveField] = useState(null);
     const activeDragRef = useRef(null);
     const moistureGaugeRef = useRef(null);
+    const waterLevelRef = useRef(null);
     const phTrackRef = useRef(null);
     const npkTrackRefs = useRef({});
     const dragStartRef = useRef({ x: 0, y: 0 });
     const dragArmedRef = useRef(false);
     const pendingFieldPatchRef = useRef({});
-    const patchFrameRef = useRef(null);
+    const pendingLivePatchRef = useRef({});
+    const livePatchFrameRef = useRef(null);
+    const patchTimeoutRef = useRef(null);
+    const lastPatchFlushRef = useRef(0);
     const dragListenersBoundRef = useRef(false);
     const dragCleanupRef = useRef(null);
     const moistureValue = liveField?.moisture ?? data.moisture;
     const phValue = liveField?.ph ?? data.ph;
+    const wlValue = liveField?.wl ?? data.wl;
     const nValue = liveField?.n ?? data.n;
     const pValue = liveField?.p ?? data.p;
     const kValue = liveField?.k ?? data.k;
+    const irrigationValue = liveField?.irrigation ?? data.irrigation;
     const mc = moistureColor(moistureValue);
     const phPct = (phValue / 14 * 100).toFixed(1);
-    const wlPct = Math.min(data.wl / 30 * 100, 100);
+    const wlPct = Math.min(wlValue / 30 * 100, 100);
     const moistureAngle = -90 + (moistureValue / 100) * 180;
     const fieldScaleTicks = [
       { value: 30, position: 100, emphasis: true },
@@ -306,19 +384,29 @@ const AgricultureDashboard = () => {
     };
     const scheduleFieldPatch = (patch) => {
       pendingFieldPatchRef.current = { ...pendingFieldPatchRef.current, ...patch };
-      if (patchFrameRef.current !== null) return;
-      patchFrameRef.current = window.requestAnimationFrame(() => {
-        patchFrameRef.current = null;
+      if (patchTimeoutRef.current !== null) return;
+      const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      const remaining = Math.max(0, DRAG_COMMIT_INTERVAL_MS - (now - lastPatchFlushRef.current));
+      patchTimeoutRef.current = window.setTimeout(() => {
+        patchTimeoutRef.current = null;
         flushFieldPatch();
-      });
+      }, remaining);
     };
     const setLivePatch = (patch) => {
-      setLiveField((prev) => ({ ...(prev ?? {}), ...patch }));
+      pendingLivePatchRef.current = { ...pendingLivePatchRef.current, ...patch };
+      if (livePatchFrameRef.current !== null) return;
+      livePatchFrameRef.current = window.requestAnimationFrame(() => {
+        livePatchFrameRef.current = null;
+        const nextPatch = pendingLivePatchRef.current;
+        pendingLivePatchRef.current = {};
+        setLiveField((prev) => ({ ...(prev ?? {}), ...nextPatch }));
+      });
     };
     const flushFieldPatch = () => {
       const nextPatch = pendingFieldPatchRef.current;
       pendingFieldPatchRef.current = {};
       if (Object.keys(nextPatch).length) {
+        lastPatchFlushRef.current = typeof performance !== 'undefined' ? performance.now() : Date.now();
         updateField(nextPatch);
       }
     };
@@ -342,6 +430,14 @@ const AgricultureDashboard = () => {
       setLivePatch({ ph: next });
       scheduleFieldPatch({ ph: next });
     };
+    const setWaterLevelFromPointer = (clientY) => {
+      if (!waterLevelRef.current) return;
+      const rect = waterLevelRef.current.getBoundingClientRect();
+      const pct = clamp((rect.bottom - clientY) / rect.height, 0, 1);
+      const next = Number((pct * 30).toFixed(1));
+      setLivePatch({ wl: next });
+      scheduleFieldPatch({ wl: next });
+    };
     const setNpkFromPointer = (key, clientX) => {
       const track = npkTrackRefs.current[key];
       if (!track) return;
@@ -356,11 +452,12 @@ const AgricultureDashboard = () => {
         endDrag();
       }
       activeEditFieldsRef.current[fieldKey] = true;
-      setLiveField({ moisture: data.moisture, ph: data.ph, n: data.n, p: data.p, k: data.k });
+      setLiveField({ moisture: data.moisture, ph: data.ph, wl: data.wl, n: data.n, p: data.p, k: data.k });
       activeDragRef.current = target;
       dragStartRef.current = { x: startX, y: startY };
       dragArmedRef.current = false;
-      setDragTarget(target.type === 'moisture' ? null : target.type === 'ph' ? 'ph' : target.key);
+      lastPatchFlushRef.current = 0;
+      setDragTarget(target.type === 'moisture' ? 'moisture' : target.type === 'ph' ? 'ph' : target.type === 'wl' ? 'wl' : target.key);
       setIsMoistureDragging(target.type === 'moisture');
     };
     const processDragMove = (clientX, clientY) => {
@@ -374,9 +471,18 @@ const AgricultureDashboard = () => {
         setPhFromPointer(clientX);
         return;
       }
+      if (activeDragRef.current.type === 'wl') {
+        setWaterLevelFromPointer(clientY);
+        return;
+      }
       if (activeDragRef.current.type === 'npk') {
         setNpkFromPointer(activeDragRef.current.key, clientX);
       }
+    };
+    const handlePointerMove = (type, clientX, clientY, key) => {
+      if (!activeDragRef.current || activeDragRef.current.type !== type) return;
+      if (type === 'npk' && activeDragRef.current.key !== key) return;
+      processDragMove(clientX, clientY);
     };
     const endDrag = () => {
       activeDragRef.current = null;
@@ -384,6 +490,7 @@ const AgricultureDashboard = () => {
       setIsMoistureDragging(false);
       setDragTarget(null);
       flushFieldPatch();
+      pendingLivePatchRef.current = {};
       setLiveField(null);
       window.setTimeout(() => {
         activeEditFieldsRef.current[fieldKey] = false;
@@ -404,25 +511,25 @@ const AgricultureDashboard = () => {
         unbindGlobalDragListeners();
       };
       if (supportsPointer) {
-        window.addEventListener('pointermove', onMove, { passive: false });
-        window.addEventListener('pointerup', onEnd);
-        window.addEventListener('pointercancel', onEnd);
+        document.addEventListener('pointermove', onMove, { passive: false });
+        document.addEventListener('pointerup', onEnd);
+        document.addEventListener('pointercancel', onEnd);
       } else {
-        window.addEventListener('mousemove', onMove, { passive: false });
-        window.addEventListener('mouseup', onEnd);
-        window.addEventListener('touchmove', onMove, { passive: false });
-        window.addEventListener('touchend', onEnd);
-        window.addEventListener('touchcancel', onEnd);
+        document.addEventListener('mousemove', onMove, { passive: false });
+        document.addEventListener('mouseup', onEnd);
+        document.addEventListener('touchmove', onMove, { passive: false });
+        document.addEventListener('touchend', onEnd);
+        document.addEventListener('touchcancel', onEnd);
       }
       dragCleanupRef.current = () => {
-        window.removeEventListener('pointermove', onMove);
-        window.removeEventListener('pointerup', onEnd);
-        window.removeEventListener('pointercancel', onEnd);
-        window.removeEventListener('mousemove', onMove);
-        window.removeEventListener('mouseup', onEnd);
-        window.removeEventListener('touchmove', onMove);
-        window.removeEventListener('touchend', onEnd);
-        window.removeEventListener('touchcancel', onEnd);
+        document.removeEventListener('pointermove', onMove);
+        document.removeEventListener('pointerup', onEnd);
+        document.removeEventListener('pointercancel', onEnd);
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onEnd);
+        document.removeEventListener('touchmove', onMove);
+        document.removeEventListener('touchend', onEnd);
+        document.removeEventListener('touchcancel', onEnd);
       };
       dragListenersBoundRef.current = true;
     };
@@ -435,8 +542,11 @@ const AgricultureDashboard = () => {
 
     useEffect(() => {
       return () => {
-        if (patchFrameRef.current !== null) {
-          window.cancelAnimationFrame(patchFrameRef.current);
+        if (livePatchFrameRef.current !== null) {
+          window.cancelAnimationFrame(livePatchFrameRef.current);
+        }
+        if (patchTimeoutRef.current !== null) {
+          window.clearTimeout(patchTimeoutRef.current);
         }
         endDrag();
         unbindGlobalDragListeners();
@@ -452,8 +562,8 @@ const AgricultureDashboard = () => {
             className="dot field-status-dot"
             style={{
               marginLeft: 'auto',
-              background: data.irrigation ? '#3b82f6' : data.drain ? '#ef4444' : 'transparent',
-              border: data.irrigation || data.drain ? 'none' : '1px solid transparent'
+              background: irrigationValue ? '#3b82f6' : data.drain ? '#ef4444' : 'transparent',
+              border: irrigationValue || data.drain ? 'none' : '1px solid transparent'
             }}
           ></span>
         </div>
@@ -469,14 +579,12 @@ const AgricultureDashboard = () => {
                 style={{ overflow: 'visible', touchAction: 'none' }}
                 onPointerDown={(event) => {
                   event.preventDefault();
-                  event.currentTarget.setPointerCapture(event.pointerId);
                   startDrag({ type: 'moisture' }, event.clientX, event.clientY);
                   setMoistureFromPointer(event.clientX, event.clientY);
                   bindGlobalDragListeners();
                 }}
                 onPointerMove={(event) => {
-                  if (!activeDragRef.current || activeDragRef.current.type !== 'moisture') return;
-                  processDragMove(event.clientX, event.clientY);
+                  handlePointerMove('moisture', event.clientX, event.clientY);
                 }}
                 onPointerUp={() => {
                   if (activeDragRef.current && activeDragRef.current.type === 'moisture') {
@@ -485,12 +593,6 @@ const AgricultureDashboard = () => {
                   }
                 }}
                 onPointerCancel={() => {
-                  if (activeDragRef.current && activeDragRef.current.type === 'moisture') {
-                    endDrag();
-                    unbindGlobalDragListeners();
-                  }
-                }}
-                onLostPointerCapture={() => {
                   if (activeDragRef.current && activeDragRef.current.type === 'moisture') {
                     endDrag();
                     unbindGlobalDragListeners();
@@ -530,7 +632,41 @@ const AgricultureDashboard = () => {
             <span className="lbl">Moisture</span>
           </div>
           <div className="col">
-            <div className="water-level-indicator" onClick={() => updateField({ wl: bump(data.wl, 1, 0, 30, 1) })} style={{ cursor: 'pointer' }} title="Adjust water level">
+            <div
+              ref={waterLevelRef}
+              className={`water-level-indicator ${dragTarget === 'wl' ? 'dragging' : ''}`}
+              onPointerDown={(event) => {
+                event.preventDefault();
+                startDrag({ type: 'wl' }, event.clientX, event.clientY);
+                setWaterLevelFromPointer(event.clientY);
+                bindGlobalDragListeners();
+              }}
+              onPointerMove={(event) => {
+                handlePointerMove('wl', event.clientX, event.clientY);
+              }}
+              onPointerUp={() => {
+                if (activeDragRef.current && activeDragRef.current.type === 'wl') {
+                  endDrag();
+                  unbindGlobalDragListeners();
+                }
+              }}
+              onPointerCancel={() => {
+                if (activeDragRef.current && activeDragRef.current.type === 'wl') {
+                  endDrag();
+                  unbindGlobalDragListeners();
+                }
+              }}
+              onTouchStart={(event) => {
+                if (typeof window !== 'undefined' && 'PointerEvent' in window) return;
+                if (!event.touches[0]) return;
+                if (event.cancelable) event.preventDefault();
+                startDrag({ type: 'wl' }, event.touches[0].clientX, event.touches[0].clientY);
+                setWaterLevelFromPointer(event.touches[0].clientY);
+                bindGlobalDragListeners();
+              }}
+              style={{ cursor: dragTarget === 'wl' ? 'grabbing' : 'ns-resize', touchAction: 'none' }}
+              title="Drag up or down to set water level"
+            >
               <div className="tank-meter compact water-level-indicator-inner">
                 <div className="field-tank">
                   <AnimatedWaterFill height={`${wlPct}%`} />
@@ -538,7 +674,7 @@ const AgricultureDashboard = () => {
                 <WaterScale ticks={fieldScaleTicks} compact />
               </div>
             </div>
-            <div className="val" style={{ marginLeft: '-45px' }}>{data.wl.toFixed(1)} cm</div>
+            <div className="val" style={{ marginLeft: '-45px' }}>{wlValue.toFixed(1)} cm</div>
             <span className="lbl" style={{ marginLeft: '-45px' }}>Water</span>
           </div>
           <div className="col" style={{ width: '100%' }}>
@@ -548,14 +684,12 @@ const AgricultureDashboard = () => {
               className={`ph-track ${dragTarget === 'ph' ? 'dragging' : ''}`}
               onPointerDown={(event) => {
                 event.preventDefault();
-                event.currentTarget.setPointerCapture(event.pointerId);
                 startDrag({ type: 'ph' }, event.clientX, event.clientY);
                 setPhFromPointer(event.clientX);
                 bindGlobalDragListeners();
               }}
               onPointerMove={(event) => {
-                if (!activeDragRef.current || activeDragRef.current.type !== 'ph') return;
-                processDragMove(event.clientX, event.clientY);
+                handlePointerMove('ph', event.clientX, event.clientY);
               }}
               onPointerUp={() => {
                 if (activeDragRef.current && activeDragRef.current.type === 'ph') {
@@ -564,12 +698,6 @@ const AgricultureDashboard = () => {
                 }
               }}
               onPointerCancel={() => {
-                if (activeDragRef.current && activeDragRef.current.type === 'ph') {
-                  endDrag();
-                  unbindGlobalDragListeners();
-                }
-              }}
-              onLostPointerCapture={() => {
                 if (activeDragRef.current && activeDragRef.current.type === 'ph') {
                   endDrag();
                   unbindGlobalDragListeners();
@@ -601,14 +729,12 @@ const AgricultureDashboard = () => {
                    className={`npk-track interactive ${dragTarget === item.key ? 'dragging' : ''}`}
                    onPointerDown={(event) => {
                      event.preventDefault();
-                     event.currentTarget.setPointerCapture(event.pointerId);
                      startDrag({ type: 'npk', key: item.key }, event.clientX, event.clientY);
                      setNpkFromPointer(item.key, event.clientX);
                      bindGlobalDragListeners();
                    }}
                    onPointerMove={(event) => {
-                     if (!activeDragRef.current || activeDragRef.current.type !== 'npk' || activeDragRef.current.key !== item.key) return;
-                     processDragMove(event.clientX, event.clientY);
+                     handlePointerMove('npk', event.clientX, event.clientY, item.key);
                    }}
                    onPointerUp={() => {
                      if (activeDragRef.current && activeDragRef.current.type === 'npk' && activeDragRef.current.key === item.key) {
@@ -617,12 +743,6 @@ const AgricultureDashboard = () => {
                      }
                    }}
                    onPointerCancel={() => {
-                     if (activeDragRef.current && activeDragRef.current.type === 'npk' && activeDragRef.current.key === item.key) {
-                       endDrag();
-                       unbindGlobalDragListeners();
-                     }
-                   }}
-                   onLostPointerCapture={() => {
                      if (activeDragRef.current && activeDragRef.current.type === 'npk' && activeDragRef.current.key === item.key) {
                        endDrag();
                        unbindGlobalDragListeners();
@@ -647,7 +767,7 @@ const AgricultureDashboard = () => {
           </div>
         </div>
         <div style={{ marginTop: '10px', paddingTop: '9px', borderTop: '0.5px solid #f1f5f9', display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', columnGap: '10px', alignItems: 'center' }}>
-          <StatusChip on={data.irrigation} label="Irrigation" activeColor="#3b82f6" onClick={() => updateField({ irrigation: !data.irrigation })} />
+          <StatusChip on={irrigationValue} label="Irrigation" activeColor="#3b82f6" onClick={() => updateField({ irrigation: !irrigationValue })} />
           <StatusChip on={data.drain} label="Drain" activeColor="#ef4444" onClick={() => updateField({ drain: !data.drain })} />
           <StatusChip on={data.acid} label="Acid" onClick={() => updateField({ acid: !data.acid })} />
           <StatusChip on={data.base} label="Base" onClick={() => updateField({ base: !data.base })} />
@@ -1433,20 +1553,6 @@ const AgricultureDashboard = () => {
             </div>
           </div>
         </div>
-        <div
-          style={{
-            marginBottom: '14px',
-            padding: '12px 16px',
-            borderRadius: '14px',
-            background: '#ecfeff',
-            border: '1px solid #a5f3fc',
-            color: '#155e75',
-            fontSize: '16px',
-            fontWeight: 700,
-          }}
-        >
-          {sendStatus}
-        </div>
         <div className="quad-grid">
           <div className="quad-section">
             <div className="overview-grid">
@@ -1535,9 +1641,8 @@ const AgricultureDashboard = () => {
                 <div className="gh-panel-main">
                   <div
                     className="gh-panel-icon"
-                    onClick={() => setState((prev) => ({ ...prev, gh: { ...prev.gh, fanOn: !prev.gh.fanOn } }))}
                     style={{ background: fanOn ? 'linear-gradient(180deg, #f0fdf4 0%, #dcfce7 100%)' : 'linear-gradient(180deg, #ffffff 0%, #eef3f8 100%)', boxShadow: fanOn ? '0 6px 16px rgba(13, 148, 136, 0.16)' : 'inset 0 1px 0 rgba(255,255,255,0.9)', cursor: 'pointer' }}
-                    title="Toggle fan"
+                    title="Fan turns on automatically when temperature is above 40 or humidity is above 70"
                     >
                       <svg width="36" height="36" viewBox="0 0 36 36" className={fanOn ? fanSpeedClass : 'spin-stop'}>
                       <path d="M18 18C18 9.8 26.6 7.1 28.5 12.6C30 17.1 24.3 19.4 18 18Z" fill="#0d9488" opacity="0.9"/>
@@ -1558,7 +1663,7 @@ const AgricultureDashboard = () => {
                   <button
                     type="button"
                     className="gh-step-btn"
-                    onClick={() => setState((prev) => ({ ...prev, gh: { ...prev.gh, temp: clamp(Number((prev.gh.temp - 1).toFixed(1)), 20, 60) } }))}
+                    onClick={() => updateGreenhouse({ temp: clamp(Number((state.gh.temp - 1).toFixed(1)), 20, 60) })}
                     title="Decrease temperature"
                   >
                     ▼
@@ -1590,7 +1695,7 @@ const AgricultureDashboard = () => {
                   <button
                     type="button"
                     className="gh-step-btn"
-                    onClick={() => setState((prev) => ({ ...prev, gh: { ...prev.gh, temp: clamp(Number((prev.gh.temp + 1).toFixed(1)), 20, 60) } }))}
+                    onClick={() => updateGreenhouse({ temp: clamp(Number((state.gh.temp + 1).toFixed(1)), 20, 60) })}
                     title="Increase temperature"
                   >
                     ▲
@@ -1602,7 +1707,7 @@ const AgricultureDashboard = () => {
                   <button
                     type="button"
                     className="gh-step-btn"
-                    onClick={() => setState((prev) => ({ ...prev, gh: { ...prev.gh, humidity: clamp(prev.gh.humidity - 2, 30, 95) } }))}
+                    onClick={() => updateGreenhouse({ humidity: clamp(state.gh.humidity - 2, 30, 95) })}
                     title="Decrease humidity"
                   >
                     ▼
@@ -1616,7 +1721,7 @@ const AgricultureDashboard = () => {
                   <button
                     type="button"
                     className="gh-step-btn"
-                    onClick={() => setState((prev) => ({ ...prev, gh: { ...prev.gh, humidity: clamp(prev.gh.humidity + 2, 30, 95) } }))}
+                    onClick={() => updateGreenhouse({ humidity: clamp(state.gh.humidity + 2, 30, 95) })}
                     title="Increase humidity"
                   >
                     ▲
@@ -1627,7 +1732,7 @@ const AgricultureDashboard = () => {
                 <div className="farmhouse-heading">Farm House</div>
                 <div
                   className={`farmhouse-alert ${fireOn ? 'active' : ''}`}
-                  onClick={() => setState((prev) => ({ ...prev, gh: { ...prev.gh, fireAlert: !prev.gh.fireAlert } }))}
+                  onClick={() => updateGreenhouse({ fireAlert: !fireOn })}
                   style={{
                     animation: fireOn ? 'blink 0.8s step-end infinite' : 'none'
                   }}
