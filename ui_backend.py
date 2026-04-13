@@ -18,6 +18,7 @@ from esp32connect import (
     normalize_field_body,
     number_from_value,
     print_field_update,
+    reset_state_for_shutdown,
     update_current,
     simulation_loop,
 )
@@ -420,12 +421,17 @@ class UIBackendHandler(Handler):
                 return
 
             try:
-                field_patch, _ = normalize_field_body(field_key, body)
+                field_patch, _, metadata = normalize_field_body(field_key, body)
             except ValueError as error:
                 self.send_json({"error": str(error)}, status=400)
                 return
 
-            update_current({"state": {field_key: field_patch}}, connected=False, last_error="")
+            update_current(
+                {"state": {field_key: field_patch}},
+                connected=False,
+                last_error="",
+                field_metadata={field_key: metadata},
+            )
             print_formatted_field(field_key)
 
             esp_num = self.FIELD_TO_ESP[field_key]
@@ -516,6 +522,31 @@ def terminal_loop():
             print(f"Command error: {error}")
 
 
+def shutdown_backend(server):
+    print("\nManual shutdown detected. Resetting backend state to zero and switching irrigation off.")
+
+    reset_state_for_shutdown()
+
+    for field_key in ("f1", "f2", "f3"):
+        try:
+            sync_field_relay(field_key)
+        except Exception as error:
+            print(f"[SHUTDOWN RELAY ERROR] {field_key.upper()}: {error}")
+
+    try:
+        sync_main_tank_relay()
+    except Exception as error:
+        print(f"[SHUTDOWN RELAY ERROR] MAIN TANK: {error}")
+
+    for field_key, esp_num in UIBackendHandler.FIELD_TO_ESP.items():
+        try:
+            send_current_ui_values(esp_num)
+        except Exception as error:
+            print(f"[SHUTDOWN ESP SYNC ERROR] {field_key.upper()}: {error}")
+
+    server.server_close()
+
+
 if __name__ == "__main__":
     print(f"UI backend running on http://127.0.0.1:{PORT}")
     print("Open the dashboard and change the controls. Values will auto-sync here.")
@@ -537,4 +568,7 @@ if __name__ == "__main__":
     threading.Thread(target=simulation_loop, daemon=True).start()
     threading.Thread(target=observer_loop, daemon=True).start()
 
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        shutdown_backend(server)

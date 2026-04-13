@@ -118,9 +118,10 @@ const ControlPage = ({ controlValues = {}, setControlValues = () => {} }) => {
   const values = { ...DEFAULT_VALUES, ...controlValues };
 
   const handleSliderChange = (key, value) => {
+    const numericValue = parseFloat(value);
     setControlValues((prev) => ({
       ...prev,
-      [key]: parseFloat(value),
+      [key]: numericValue,
     }));
   };
 
