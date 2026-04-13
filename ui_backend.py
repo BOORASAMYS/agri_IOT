@@ -1,8 +1,11 @@
 from copy import deepcopy
 from http.server import ThreadingHTTPServer
 import json
+import queue
+import socket
 import sys
 import threading
+import time
 
 from urllib.parse import urlparse
 
@@ -26,8 +29,10 @@ from esp32connect import (
 )
 
 try:
+    from Agri_iot import close as close_modbus_controller
     from Agri_iot import control as modbus_control
 except Exception as import_error:
+    close_modbus_controller = None
     modbus_control = None
     MODBUS_IMPORT_ERROR = import_error
 else:
@@ -46,6 +51,271 @@ RELAY_COMMANDS = {
     "f2": {True: "r3on", False: "r3off"},
     "f3": {True: "r4on", False: "r4off"},
 }
+
+ESP_REQUEST_TIMEOUT = 3
+ESP_RETRY_LIMIT = 3
+ESP_RETRY_BACKOFF_SECONDS = 0.75
+ESP_INTER_REQUEST_DELAY_SECONDS = 0.2
+PLC_COMMAND_QUEUE_TIMEOUT_SECONDS = 1.0
+ESP_COMMAND_QUEUE_TIMEOUT_SECONDS = 1.0
+
+
+def format_worker_error(error):
+    return f"{type(error).__name__}: {error}"
+
+
+class PLCCommandWorker:
+    def __init__(self):
+        self._queue = queue.Queue()
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="plc-worker", daemon=True)
+
+    def start(self):
+        self._thread.start()
+
+    def stop(self):
+        self._stop_event.set()
+        self._queue.put(None)
+        self._thread.join(timeout=3)
+
+    def enqueue(self, command, source="control", wait=False, timeout=5.0):
+        message = {
+            "type": "relay",
+            "command": command,
+            "source": source,
+            "event": None,
+            "result": None,
+            "error": None,
+        }
+        if wait:
+            message["event"] = threading.Event()
+
+        self._queue.put(message)
+
+        if not wait:
+            return {"queued": True, "command": command, "source": source}
+
+        if not message["event"].wait(timeout):
+            raise TimeoutError(f"Timed out waiting for PLC command '{command}'")
+        if message["error"] is not None:
+            raise message["error"]
+        return message["result"]
+
+    def _run(self):
+        while not self._stop_event.is_set():
+            try:
+                message = self._queue.get(timeout=PLC_COMMAND_QUEUE_TIMEOUT_SECONDS)
+            except queue.Empty:
+                continue
+
+            if message is None:
+                self._queue.task_done()
+                break
+
+            try:
+                result = send_relay_command(message["command"])
+                message["result"] = result
+            except Exception as error:
+                message["error"] = error
+                print(f"[PLC WORKER ERROR] {message['command']}: {format_worker_error(error)}")
+            finally:
+                if message["event"] is not None:
+                    message["event"].set()
+                self._queue.task_done()
+
+
+class ESPCommandWorker:
+    def __init__(self):
+        self._queue = queue.Queue()
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="esp-worker", daemon=True)
+        self._session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(pool_connections=8, pool_maxsize=8)
+        self._session.mount("http://", adapter)
+        self._last_request_at = 0.0
+
+    def start(self):
+        self._thread.start()
+
+    def stop(self):
+        self._stop_event.set()
+        self._queue.put(None)
+        self._thread.join(timeout=3)
+        self._session.close()
+
+    def enqueue_sync(self, esp_num, source="control", wait=False, timeout=10.0):
+        message = {
+            "type": "sync",
+            "esp_num": esp_num,
+            "source": source,
+            "event": None,
+            "result": None,
+            "error": None,
+        }
+        if wait:
+            message["event"] = threading.Event()
+
+        self._queue.put(message)
+
+        if not wait:
+            return {"queued": True, "esp": esp_num, "source": source}
+
+        if not message["event"].wait(timeout):
+            raise TimeoutError(f"Timed out waiting for ESP{esp_num} sync")
+        if message["error"] is not None:
+            raise message["error"]
+        return message["result"]
+
+    def enqueue_payload(self, esp_num, payload, source="control", wait=False, timeout=10.0):
+        message = {
+            "type": "payload",
+            "esp_num": esp_num,
+            "payload": payload,
+            "source": source,
+            "event": None,
+            "result": None,
+            "error": None,
+        }
+        if wait:
+            message["event"] = threading.Event()
+
+        self._queue.put(message)
+
+        if not wait:
+            return {"queued": True, "esp": esp_num, "source": source}
+
+        if not message["event"].wait(timeout):
+            raise TimeoutError(f"Timed out waiting for ESP{esp_num} payload send")
+        if message["error"] is not None:
+            raise message["error"]
+        return message["result"]
+
+    def _run(self):
+        while not self._stop_event.is_set():
+            try:
+                message = self._queue.get(timeout=ESP_COMMAND_QUEUE_TIMEOUT_SECONDS)
+            except queue.Empty:
+                continue
+
+            if message is None:
+                self._queue.task_done()
+                break
+
+            try:
+                if message["type"] == "sync":
+                    payload = get_esp_payload_from_state(message["esp_num"])
+                    result = self._send_payload(message["esp_num"], payload)
+                else:
+                    result = self._send_payload(message["esp_num"], message["payload"])
+                message["result"] = result
+            except Exception as error:
+                message["error"] = error
+                print(f"[ESP WORKER ERROR] ESP{message['esp_num']}: {format_worker_error(error)}")
+            finally:
+                if message["event"] is not None:
+                    message["event"].set()
+                self._queue.task_done()
+
+    def _send_payload(self, esp_num, payload):
+        if esp_num not in ESP_DEVICES:
+            raise ValueError("Invalid ESP number")
+
+        target_ip = ESP_DEVICES[esp_num]
+        last_error = None
+
+        for attempt in range(1, ESP_RETRY_LIMIT + 1):
+            self._pace_requests()
+            try:
+                if esp_num == 4:
+                    fan = str(payload["fan"]).lower()
+                    url = f"http://{target_ip}/set?temp={payload['temp']}&humid={payload['humid']}&fan={fan}"
+                else:
+                    pump = str(payload["pump"]).lower()
+                    url = (
+                        f"http://{target_ip}/set?level={payload['level']}&pump={pump}"
+                        f"&ph={payload['ph']}&moisture={payload['moisture']}"
+                    )
+
+                response = self._session.get(url, timeout=ESP_REQUEST_TIMEOUT)
+                response.raise_for_status()
+                print(f"Sent to ESP{esp_num}: {url}")
+                print(f"Response: {response.status_code}")
+                return {
+                    "esp": esp_num,
+                    "ip": target_ip,
+                    "status_code": response.status_code,
+                    "url": url,
+                    "body": response.text,
+                }
+            except (
+                requests.Timeout,
+                requests.ConnectionError,
+                requests.HTTPError,
+                socket.error,
+            ) as error:
+                last_error = error
+                if attempt < ESP_RETRY_LIMIT:
+                    time.sleep(ESP_RETRY_BACKOFF_SECONDS * attempt)
+            except Exception as error:
+                last_error = error
+                break
+
+        raise RuntimeError(
+            f"ESP{esp_num} request failed after {ESP_RETRY_LIMIT} attempts: {format_worker_error(last_error)}"
+        )
+
+    def _pace_requests(self):
+        now = time.time()
+        delay = ESP_INTER_REQUEST_DELAY_SECONDS - (now - self._last_request_at)
+        if delay > 0:
+            time.sleep(delay)
+        self._last_request_at = time.time()
+
+
+class ControlLoopWorker:
+    def __init__(self, plc_worker, esp_worker):
+        self.plc_worker = plc_worker
+        self.esp_worker = esp_worker
+        self._last_irrigation = {"f1": False, "f2": False, "f3": False}
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="control-worker", daemon=True)
+
+    def start(self):
+        self._thread.start()
+
+    def stop(self):
+        self._stop_event.set()
+        self._thread.join(timeout=3)
+
+    def _run(self):
+        while not self._stop_event.is_set():
+            time.sleep(1)
+            self._process_irrigation_changes()
+
+    def _process_irrigation_changes(self):
+        changes = []
+        with STATE_LOCK:
+            for field_key in ("f1", "f2", "f3"):
+                current_value = bool(CURRENT["state"][field_key]["irrigation"])
+                if current_value != self._last_irrigation[field_key]:
+                    changes.append((field_key, current_value))
+                self._last_irrigation[field_key] = current_value
+
+        for field_key, is_running in changes:
+            if is_running:
+                print(f"\n[AUTO-IRRIGATION] {field_key.upper()} started because an automatic threshold was crossed.")
+            else:
+                print(f"\n[AUTO-SHUTOFF] {field_key.upper()} stopped after reaching 60% moisture.")
+
+            enqueue_field_relay_sync(field_key, source="control-loop")
+            enqueue_main_tank_sync(source="control-loop")
+            enqueue_esp_sync(UIBackendHandler.FIELD_TO_ESP[field_key], source="control-loop")
+            print_formatted_field(field_key)
+
+
+plc_worker = PLCCommandWorker()
+esp_worker = ESPCommandWorker()
+control_worker = ControlLoopWorker(plc_worker, esp_worker)
 
 
 def get_dashboard_snapshot():
@@ -148,46 +418,35 @@ def get_esp_payload_from_state(esp_num):
     raise ValueError("Invalid ESP number")
 
 
-def send_to_esp(esp_num, level, pump, ph, moisture):
-    if esp_num not in ESP_DEVICES:
-        raise ValueError("Invalid ESP number")
-
-    esp_ip = ESP_DEVICES[esp_num]
+def build_manual_esp_payload(esp_num, level, pump, ph, moisture):
     if esp_num == 4:
-        fan = pump.lower()
+        fan = str(pump).lower()
         if fan not in {"on", "off"}:
             raise ValueError("Fan must be 'on' or 'off'")
-        url = f"http://{esp_ip}/set?temp={level}&humid={ph}&fan={fan}"
-    else:
-        pump = pump.lower()
-        if pump not in {"on", "off"}:
-            raise ValueError("Pump must be 'on' or 'off'")
-        url = f"http://{esp_ip}/set?level={level}&pump={pump}&ph={ph}&moisture={moisture}"
+        return {
+            "temp": int(level),
+            "humid": int(ph),
+            "fan": fan,
+        }
 
-    response = requests.get(url, timeout=5)
+    pump_value = str(pump).lower()
+    if pump_value not in {"on", "off"}:
+        raise ValueError("Pump must be 'on' or 'off'")
+    return {
+        "level": float(level),
+        "pump": pump_value,
+        "ph": float(ph),
+        "moisture": float(moisture),
+    }
 
-    print(f"Sent to ESP{esp_num}: {url}")
-    print(f"Response: {response.status_code}")
-    return response
+
+def send_to_esp(esp_num, level, pump, ph, moisture):
+    payload = build_manual_esp_payload(esp_num, level, pump, ph, moisture)
+    return esp_worker.enqueue_payload(esp_num, payload, source="manual-send", wait=True)
 
 
 def send_current_ui_values(esp_num):
-    payload = get_esp_payload_from_state(esp_num)
-    if esp_num == 4:
-        return send_to_esp(
-            esp_num,
-            payload["temp"],
-            payload["fan"],
-            payload["humid"],
-            payload["humid"],
-        )
-    return send_to_esp(
-        esp_num,
-        payload["level"],
-        payload["pump"],
-        payload["ph"],
-        payload["moisture"],
-    )
+    return esp_worker.enqueue_sync(esp_num, source="ui-sync", wait=True)
 
 
 def print_selected_values():
@@ -223,7 +482,7 @@ def send_relay_command(command):
 def sync_main_tank_relay():
     with STATE_LOCK:
         pumping = bool(CURRENT["state"]["pumping"])
-    return send_relay_command(RELAY_COMMANDS["main_tank"][pumping])
+    return plc_worker.enqueue(RELAY_COMMANDS["main_tank"][pumping], source="main-tank-sync", wait=True)
 
 
 def sync_field_relay(field_key):
@@ -231,7 +490,25 @@ def sync_field_relay(field_key):
         raise ValueError("Invalid field for relay sync")
     with STATE_LOCK:
         irrigation_on = bool(CURRENT["state"][field_key]["irrigation"])
-    return send_relay_command(RELAY_COMMANDS[field_key][irrigation_on])
+    return plc_worker.enqueue(RELAY_COMMANDS[field_key][irrigation_on], source=f"{field_key}-sync", wait=True)
+
+
+def enqueue_main_tank_sync(source="control"):
+    with STATE_LOCK:
+        pumping = bool(CURRENT["state"]["pumping"])
+    return plc_worker.enqueue(RELAY_COMMANDS["main_tank"][pumping], source=source, wait=False)
+
+
+def enqueue_field_relay_sync(field_key, source="control"):
+    if field_key not in {"f1", "f2", "f3"}:
+        raise ValueError("Invalid field for relay sync")
+    with STATE_LOCK:
+        irrigation_on = bool(CURRENT["state"][field_key]["irrigation"])
+    return plc_worker.enqueue(RELAY_COMMANDS[field_key][irrigation_on], source=source, wait=False)
+
+
+def enqueue_esp_sync(esp_num, source="control"):
+    return esp_worker.enqueue_sync(esp_num, source=source, wait=False)
 
 
 def build_patch_from_command(path_tokens, raw_value):
@@ -317,10 +594,10 @@ def handle_terminal_command(command):
         update_current(patch, connected=False, last_error="")
         relay_target = path_tokens[0] if path_tokens and path_tokens[0] in {"f1", "f2", "f3"} else None
         if relay_target is not None:
-            sync_field_relay(relay_target)
-            sync_main_tank_relay()
+            enqueue_field_relay_sync(relay_target, source="terminal")
+            enqueue_main_tank_sync(source="terminal")
         if path_tokens and path_tokens[0] == "pumping":
-            sync_main_tank_relay()
+            enqueue_main_tank_sync(source="terminal")
         print("\nValue updated from terminal")
         print_selected_values()
         return
@@ -334,7 +611,8 @@ def handle_terminal_command(command):
         pump = parts[3]
         ph = int(parts[4])
         moisture = int(parts[5])
-        send_to_esp(esp_num, level, pump, ph, moisture)
+        result = send_to_esp(esp_num, level, pump, ph, moisture)
+        print(f"Queued manual send completed for ESP{esp_num}: {result['status_code']}")
         return
 
     if action == "push":
@@ -344,7 +622,8 @@ def handle_terminal_command(command):
         esp_num = int(parts[1])
         payload = get_esp_payload_from_state(esp_num)
         print(f"\nUsing backend values for ESP{esp_num}: {payload}")
-        send_current_ui_values(esp_num)
+        result = send_current_ui_values(esp_num)
+        print(f"Backend sync completed for ESP{esp_num}: {result['status_code']}")
         return
 
     if action in {"exit", "quit"}:
@@ -399,15 +678,15 @@ class UIBackendHandler(Handler):
                 "esp": {
                     "number": 4,
                     "ip": ESP_DEVICES[4],
-                    "synced": False,
+                    "queued": False,
                 },
                 "dashboard": CURRENT,
             }
 
             try:
                 payload = get_esp_payload_from_state(4)
-                send_current_ui_values(4)
-                response_payload["esp"]["synced"] = True
+                enqueue_esp_sync(4, source="greenhouse-api")
+                response_payload["esp"]["queued"] = True
                 response_payload["esp"]["payload"] = payload
             except Exception as error:
                 response_payload["warning"] = f"Saved locally, but ESP sync failed: {error}"
@@ -449,18 +728,18 @@ class UIBackendHandler(Handler):
                 "esp": {
                     "number": esp_num,
                     "ip": ESP_DEVICES[esp_num],
-                    "synced": False,
+                    "queued": False,
                 },
                 "dashboard": CURRENT,
             }
 
             try:
-                sync_field_relay(field_key)
+                enqueue_field_relay_sync(field_key, source="field-api")
             except Exception as error:
                 response_payload["relayWarning"] = f"Saved locally, but relay sync failed: {error}"
 
             try:
-                sync_main_tank_relay()
+                enqueue_main_tank_sync(source="field-api")
             except Exception as error:
                 existing_warning = response_payload.get("relayWarning")
                 main_warning = f"Main tank relay sync failed: {error}"
@@ -468,8 +747,8 @@ class UIBackendHandler(Handler):
 
             try:
                 payload = get_esp_payload_from_state(esp_num)
-                send_current_ui_values(esp_num)
-                response_payload["esp"]["synced"] = True
+                enqueue_esp_sync(esp_num, source="field-api")
+                response_payload["esp"]["queued"] = True
                 response_payload["esp"]["payload"] = payload
             except Exception as error:
                 response_payload["warning"] = f"Saved locally, but ESP sync failed: {error}"
@@ -481,35 +760,8 @@ class UIBackendHandler(Handler):
 
 
 def observer_loop():
-    last_irrigation = {"f1": False, "f2": False, "f3": False}
     while True:
-        __import__("time").sleep(1)
-        changes = []
-        with STATE_LOCK:
-            for k in ("f1", "f2", "f3"):
-                curr = CURRENT["state"][k]["irrigation"]
-                if last_irrigation[k] != curr:
-                    changes.append((k, curr))
-                last_irrigation[k] = curr
-
-        for k, is_running in changes:
-            if is_running:
-                print(f"\n[AUTO-IRRIGATION] {k.upper()} started because an automatic threshold was crossed.")
-            else:
-                print(f"\n[AUTO-SHUTOFF] {k.upper()} stopped after reaching 60% moisture.")
-            try:
-                sync_field_relay(k)
-            except Exception as error:
-                print(f"[RELAY SYNC ERROR] {k.upper()}: {error}")
-            try:
-                sync_main_tank_relay()
-            except Exception as error:
-                print(f"[RELAY SYNC ERROR] MAIN TANK: {error}")
-            try:
-                send_current_ui_values(UIBackendHandler.FIELD_TO_ESP[k])
-            except Exception as error:
-                print(f"[ESP SYNC ERROR] {k.upper()}: {error}")
-            print_formatted_field(k)
+        time.sleep(60)
 
 
 def terminal_loop():
@@ -551,6 +803,15 @@ def shutdown_backend(server):
         except Exception as error:
             print(f"[SHUTDOWN ESP SYNC ERROR] {field_key.upper()}: {error}")
 
+    control_worker.stop()
+    esp_worker.stop()
+    plc_worker.stop()
+    if close_modbus_controller is not None:
+        try:
+            close_modbus_controller()
+        except Exception as error:
+            print(f"[PLC CLOSE ERROR] {error}")
+
     server.server_close()
 
 
@@ -572,8 +833,10 @@ if __name__ == "__main__":
     else:
         print("Interactive terminal commands are disabled because stdin is not attached to a TTY.")
 
+    plc_worker.start()
+    esp_worker.start()
+    control_worker.start()
     threading.Thread(target=simulation_loop, daemon=True).start()
-    threading.Thread(target=observer_loop, daemon=True).start()
 
     try:
         server.serve_forever()
