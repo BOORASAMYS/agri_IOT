@@ -15,12 +15,14 @@ from esp32connect import (
     STATE_LOCK,
     Handler,
     bool_from_value,
+    moisture_to_water_level,
     normalize_field_body,
     number_from_value,
     print_field_update,
     reset_state_for_shutdown,
     update_current,
     simulation_loop,
+    water_level_to_moisture,
 )
 
 try:
@@ -260,7 +262,12 @@ def build_patch_from_command(path_tokens, raw_value):
             raise ValueError("Invalid field key")
         current_value = state[field_key][key]
         value = bool_from_value(raw_value) if isinstance(current_value, bool) else number_from_value(raw_value, current_value)
-        return {"state": {field_key: {key: value}}}
+        field_patch = {key: value}
+        if key == "moisture":
+            field_patch["wl"] = moisture_to_water_level(value)
+        elif key == "wl":
+            field_patch["moisture"] = water_level_to_moisture(value)
+        return {"state": {field_key: field_patch}}
 
     raise ValueError("Unsupported path")
 

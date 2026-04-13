@@ -42,6 +42,8 @@ const createInitialDashboardState = () => applyMainTankRules({
 });
 
 const clampValue = (value, min, max) => Math.max(min, Math.min(max, value));
+const moistureToWaterLevel = (moisture) => Number(clampValue((moisture / 100) * 30, 0, 30).toFixed(1));
+const waterLevelToMoisture = (waterLevel) => Number(clampValue((waterLevel / 30) * 100, 0, 100).toFixed(1));
 const percentPerTickToLitersPerMinute = (percentPerTick) => (
   (percentPerTick / 100) * MAIN_TANK_CAPACITY_ML * (60000 / AUTOMATION_TICK_MS) / 1000
 );
@@ -173,7 +175,7 @@ const AgricultureDashboard = () => {
             0,
             100
           );
-          const wlDelta = (irrigation ? 0.6 : -0.25) - (drain ? 1.0 : 0);
+          const nextWaterLevel = moistureToWaterLevel(nextMoisture);
           const phTarget = 6.6 + index * 0.1;
           const acid = field.ph > phTarget + 0.45;
           const base = field.ph < phTarget - 0.45;
@@ -188,7 +190,7 @@ const AgricultureDashboard = () => {
             : {
                 ...field,
                 moisture: nextMoisture,
-                wl: clampValue(Number((field.wl + wlDelta).toFixed(1)), 0, 30),
+                wl: nextWaterLevel,
                 ph: clampValue(Number(nextPh.toFixed(2)), 0, 14),
                 n: clampValue(Number((field.n - (irrigation ? 0.25 : 0.08)).toFixed(1)), 0, 100),
                 p: clampValue(Number((field.p - (irrigation ? 0.2 : 0.06)).toFixed(1)), 0, 100),
@@ -568,7 +570,11 @@ const AgricultureDashboard = () => {
       if (Object.prototype.hasOwnProperty.call(patch, 'irrigation')) {
         manualIrrigationOverrideRef.current[fieldKey] = patch.irrigation;
       }
-      if (Object.prototype.hasOwnProperty.call(patch, 'moisture') || Object.prototype.hasOwnProperty.call(patch, 'ph')) {
+      if (
+        Object.prototype.hasOwnProperty.call(patch, 'moisture')
+        || Object.prototype.hasOwnProperty.call(patch, 'wl')
+        || Object.prototype.hasOwnProperty.call(patch, 'ph')
+      ) {
         delete manualIrrigationOverrideRef.current[fieldKey];
       }
       setState((prev) => ({
@@ -612,9 +618,10 @@ const AgricultureDashboard = () => {
     };
     const setMoistureDisplayValue = (next) => {
       const normalized = Number(clamp(next, 0, 100).toFixed(1));
+      const linkedWaterLevel = moistureToWaterLevel(normalized);
       moistureDisplayRef.current = normalized;
-      setLivePatch({ moisture: normalized });
-      scheduleFieldPatch({ moisture: normalized });
+      setLivePatch({ moisture: normalized, wl: linkedWaterLevel });
+      scheduleFieldPatch({ moisture: normalized, wl: linkedWaterLevel });
     };
     const animateMoistureTowardTarget = () => {
       moistureAnimationFrameRef.current = null;
@@ -686,8 +693,11 @@ const AgricultureDashboard = () => {
       const rect = waterLevelRef.current.getBoundingClientRect();
       const pct = clamp((rect.bottom - clientY) / rect.height, 0, 1);
       const next = Number((pct * 30).toFixed(1));
-      setLivePatch({ wl: next });
-      scheduleFieldPatch({ wl: next });
+      const linkedMoisture = waterLevelToMoisture(next);
+      moistureTargetRef.current = linkedMoisture;
+      moistureDisplayRef.current = linkedMoisture;
+      setLivePatch({ wl: next, moisture: linkedMoisture });
+      scheduleFieldPatch({ wl: next, moisture: linkedMoisture });
     };
     const setNpkFromPointer = (key, clientX) => {
       const track = npkTrackRefs.current[key];

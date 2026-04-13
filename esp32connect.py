@@ -132,6 +132,16 @@ def number_from_value(value, fallback):
         return fallback
 
 
+def moisture_to_water_level(moisture):
+    normalized_moisture = max(0.0, min(100.0, number_from_value(moisture, 0.0)))
+    return round((normalized_moisture / 100.0) * 30.0, 1)
+
+
+def water_level_to_moisture(water_level):
+    normalized_water_level = max(0.0, min(30.0, number_from_value(water_level, 0.0)))
+    return round((normalized_water_level / 30.0) * 100.0, 1)
+
+
 def moisture_to_ph(moisture):
     normalized_moisture = max(0.0, min(100.0, number_from_value(moisture, 0.0)))
     return round(max(0.0, min(14.0, 1.0 + (normalized_moisture / 10.0))), 2)
@@ -414,6 +424,8 @@ def normalize_field_body(field_key, body):
     field_patch = {}
     device_payload = {"field": field_key}
     metadata = {"manual_irrigation_control": False}
+    moisture_updated = False
+    water_level_updated = False
 
     for source_key, target_key in (
         ("moisture", "moisture"),
@@ -429,10 +441,26 @@ def normalize_field_body(field_key, body):
         value = number_from_value(incoming[source_key], current_field[target_key])
         field_patch[target_key] = value
         device_payload[target_key] = value
+        if target_key == "moisture":
+            moisture_updated = True
+        if target_key == "wl":
+            water_level_updated = True
+
+    if moisture_updated and not water_level_updated:
+        linked_water_level = moisture_to_water_level(field_patch["moisture"])
+        field_patch["wl"] = linked_water_level
+        device_payload["wl"] = linked_water_level
+    elif water_level_updated and not moisture_updated:
+        linked_moisture = water_level_to_moisture(field_patch["wl"])
+        field_patch["moisture"] = linked_moisture
+        device_payload["moisture"] = linked_moisture
     manual_irrigation_control = bool_from_value(incoming.get("manualIrrigationControl"))
+    sensor_update_present = bool(field_patch)
 
     for key in ("irrigation", "drain", "acid", "base"):
         if key not in incoming:
+            continue
+        if key == "irrigation" and sensor_update_present and not manual_irrigation_control:
             continue
         value = bool_from_value(incoming[key])
         field_patch[key] = value
@@ -468,8 +496,9 @@ def update_current(patch, connected=None, last_error=None, field_metadata=None):
             state_patch = patch.get("state", {}) if isinstance(patch.get("state"), dict) else {}
             field_patch = state_patch.get(field_key, {}) if isinstance(state_patch.get(field_key), dict) else {}
             metadata = (field_metadata or {}).get(field_key, {})
+            sensor_update_present = any(key in field_patch for key in ("moisture", "wl", "ph", "n", "p", "k"))
 
-            if "moisture" in field_patch:
+            if "moisture" in field_patch or "wl" in field_patch:
                 MANUAL_IRRIGATION_OVERRIDES[field_key] = None
 
             if metadata.get("manual_irrigation_control") and "irrigation" in field_patch:
@@ -481,6 +510,8 @@ def update_current(patch, connected=None, last_error=None, field_metadata=None):
 
             if isinstance(manual_override, bool):
                 field["irrigation"] = manual_override
+            elif sensor_update_present:
+                field["irrigation"] = bool(desired_auto_reason)
             else:
                 field["irrigation"] = bool(desired_auto_reason) or manual_requested
 
@@ -526,21 +557,19 @@ def simulation_loop():
                     continue
 
                 if field.get("irrigation"):
-                    if field.get("wl", 0) < 30.0:
-                        field["wl"] = round(min(30.0, field.get("wl", 0) + 0.5), 1)
-                        dirty = True
                     if field.get("moisture", 0) < 100.0:
                         field["moisture"] = round(min(100.0, field.get("moisture", 0) + 1.0), 1)
                         dirty = True
 
                 else:
-                    if field.get("wl", 0) > 0.0:
-                        wl_drop = 1.0 if bool_from_value(field.get("drain")) else 0.1
-                        field["wl"] = round(max(0.0, field.get("wl", 0) - wl_drop), 1)
-                        dirty = True
                     if field.get("moisture", 0) > 0.0:
                         field["moisture"] = round(max(0.0, field.get("moisture", 0) - 0.2), 1)
                         dirty = True
+
+                linked_water_level = moisture_to_water_level(field.get("moisture", 0.0))
+                if field.get("wl") != linked_water_level:
+                    field["wl"] = linked_water_level
+                    dirty = True
                 desired_auto_reason = get_irrigation_reason(field_key, field)
                 manual_override = MANUAL_IRRIGATION_OVERRIDES[field_key]
                 manual_requested = IRRIGATION_RUNS[field_key]["reason"] == "manual" and bool_from_value(field.get("irrigation"))
