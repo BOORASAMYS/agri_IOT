@@ -2,6 +2,7 @@ from copy import deepcopy
 from http.server import ThreadingHTTPServer
 import json
 import queue
+import re
 import socket
 import sys
 import threading
@@ -58,6 +59,9 @@ ESP_RETRY_BACKOFF_SECONDS = 0.75
 ESP_INTER_REQUEST_DELAY_SECONDS = 0.2
 PLC_COMMAND_QUEUE_TIMEOUT_SECONDS = 1.0
 ESP_COMMAND_QUEUE_TIMEOUT_SECONDS = 1.0
+MAIN_TANK_SENSOR_URL = "http://192.168.0.10/tank"
+MAIN_TANK_SENSOR_TIMEOUT_SECONDS = 2
+MAIN_TANK_POLL_INTERVAL_SECONDS = 4.0
 
 
 def format_worker_error(error):
@@ -313,9 +317,60 @@ class ControlLoopWorker:
             print_formatted_field(field_key)
 
 
+class MainTankSensorWorker:
+    def __init__(self):
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="main-tank-worker", daemon=True)
+        self._session = requests.Session()
+
+    def start(self):
+        self._thread.start()
+
+    def stop(self):
+        self._stop_event.set()
+        self._thread.join(timeout=3)
+        self._session.close()
+
+    def _run(self):
+        while not self._stop_event.is_set():
+            try:
+                tank_level = self._fetch_tank_level()
+                update_current({"state": {"tank": tank_level}})
+            except Exception as error:
+                print(f"[MAIN TANK SENSOR ERROR] {format_worker_error(error)}")
+            self._stop_event.wait(MAIN_TANK_POLL_INTERVAL_SECONDS)
+
+    def _fetch_tank_level(self):
+        response = self._session.get(MAIN_TANK_SENSOR_URL, timeout=MAIN_TANK_SENSOR_TIMEOUT_SECONDS)
+        response.raise_for_status()
+        tank_level = parse_tank_level(response.text)
+        return round(max(0.0, min(100.0, tank_level)), 1)
+
+
 plc_worker = PLCCommandWorker()
 esp_worker = ESPCommandWorker()
 control_worker = ControlLoopWorker(plc_worker, esp_worker)
+main_tank_sensor_worker = MainTankSensorWorker()
+
+
+def parse_tank_level(raw_value):
+    if isinstance(raw_value, (int, float)):
+        return float(raw_value)
+
+    if raw_value is None:
+        raise ValueError("Main tank sensor returned no data")
+
+    text = str(raw_value).strip()
+    if not text:
+        raise ValueError("Main tank sensor returned an empty response")
+
+    try:
+        return float(text)
+    except ValueError:
+        match = re.search(r"-?\d+(?:\.\d+)?", text)
+        if match is None:
+            raise ValueError(f"Could not parse tank level from '{text}'")
+        return float(match.group(0))
 
 
 def get_dashboard_snapshot():
@@ -803,6 +858,7 @@ def shutdown_backend(server):
         except Exception as error:
             print(f"[SHUTDOWN ESP SYNC ERROR] {field_key.upper()}: {error}")
 
+    main_tank_sensor_worker.stop()
     control_worker.stop()
     esp_worker.stop()
     plc_worker.stop()
@@ -836,6 +892,7 @@ if __name__ == "__main__":
     plc_worker.start()
     esp_worker.start()
     control_worker.start()
+    main_tank_sensor_worker.start()
     threading.Thread(target=simulation_loop, daemon=True).start()
 
     try:
