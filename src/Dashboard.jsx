@@ -17,6 +17,8 @@ const MAIN_TANK_CAPACITY_ML = 500;
 const MAIN_TANK_REFILL_START_PERCENT = 20;
 const MAIN_TANK_FLOW_REDUCE_PERCENT = 80;
 const MAIN_TANK_FILL_TIME_MINUTES = 2;
+const MAIN_TANK_DRAIN_STEP_PERCENT = 2;
+const MAIN_TANK_DRAIN_INTERVAL_MS = 1200;
 const AUTOMATION_TICK_MS = 1200;
 const IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD = 30;
 const IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD = 60;
@@ -30,6 +32,16 @@ const INITIAL_DASHBOARD_STATE = {
   f1: { moisture: 62.4, ph: 6.81, wl: 21.3, n: 42, p: 35, k: 55, irrigation: true, drain: true, acid: true, base: false },
   f2: { moisture: 60.8, ph: 8.10, wl: 13.3, n: 38, p: 28, k: 48, irrigation: false, drain: false, acid: false, base: false },
   f3: { moisture: 24, ph: 3.2, wl: 8.5, n: 22, p: 18, k: 31, irrigation: true, drain: false, acid: false, base: true },
+};
+
+const ZERO_DASHBOARD_STATE = {
+  tank: 0,
+  pumping: false,
+  flowRate: 0,
+  gh: { temp: 0, humidity: 0, fireAlert: false, fanOn: false },
+  f1: { moisture: 0, ph: 0, wl: 0, n: 0, p: 0, k: 0, irrigation: false, drain: false, acid: false, base: false },
+  f2: { moisture: 0, ph: 0, wl: 0, n: 0, p: 0, k: 0, irrigation: false, drain: false, acid: false, base: false },
+  f3: { moisture: 0, ph: 0, wl: 0, n: 0, p: 0, k: 0, irrigation: false, drain: false, acid: false, base: false },
 };
 
 const createInitialDashboardState = () => applyMainTankRules({
@@ -90,6 +102,16 @@ const AgricultureDashboard = () => {
   const lastLocalUpdateRef = useRef(0);
   const activeEditFieldsRef = useRef({});
   const manualIrrigationOverrideRef = useRef({});
+  const tankDrainIntervalRef = useRef(null);
+  const isResetDrainingRef = useRef(false);
+
+  const stopTankDrainAnimation = () => {
+    if (tankDrainIntervalRef.current !== null) {
+      window.clearInterval(tankDrainIntervalRef.current);
+      tankDrainIntervalRef.current = null;
+    }
+    isResetDrainingRef.current = false;
+  };
 
   const markSystemDirty = () => {
     dirtyFieldsRef.current = { f1: true, f2: true, f3: true };
@@ -97,19 +119,76 @@ const AgricultureDashboard = () => {
   };
 
   const resetDashboard = () => {
+    const startingTank = state.tank;
+    const fieldSnapshot = [state.f1, state.f2, state.f3];
+    const avgMoisture = fieldSnapshot.reduce((sum, field) => sum + (field?.moisture ?? 0), 0) / fieldSnapshot.length;
+    const avgWaterLevel = fieldSnapshot.reduce((sum, field) => sum + (field?.wl ?? 0), 0) / fieldSnapshot.length;
+    const moistureDemand = clampValue((100 - avgMoisture) / 100, 0, 1);
+    
+    const waterDemand = clampValue(avgWaterLevel / 30, 0, 1);
+    const drainDemandFactor = 0.55 + moistureDemand * 0.9 + waterDemand * 0.55;
+    const dynamicDrainStep = Number(clampValue(
+      MAIN_TANK_DRAIN_STEP_PERCENT * drainDemandFactor,
+      0.6,
+      6
+    ).toFixed(1));
+    const dynamicDrainIntervalMs = Math.round(clampValue(
+      MAIN_TANK_DRAIN_INTERVAL_MS * (1.15 - moistureDemand * 0.45 + waterDemand * 0.15),
+      500,
+      1800
+    ));
+
     lastLocalUpdateRef.current = Date.now();
     markSystemDirty();
     setIsAutomationEnabled(false);
+    stopTankDrainAnimation();
+    activeEditFieldsRef.current = {};
+    manualIrrigationOverrideRef.current = { f1: false, f2: false, f3: false };
+    lastQueuedPayloadRef.current = {};
+    isResetDrainingRef.current = startingTank > 0;
     setState({
-      ...createInitialDashboardState(),
-      time: new Date().toLocaleTimeString(),
+      ...ZERO_DASHBOARD_STATE,
+      tank: startingTank,
+      pumping: false,
+      flowRate: 0,
+      time: '',
     });
+
+    if (startingTank > 0) {
+      tankDrainIntervalRef.current = window.setInterval(() => {
+        lastLocalUpdateRef.current = Date.now();
+        setState((prev) => {
+          if (prev.tank <= 0) {
+            stopTankDrainAnimation();
+            return {
+              ...prev,
+              tank: 0,
+              pumping: false,
+              flowRate: 0,
+            };
+          }
+
+          const nextTank = Number(Math.max(0, prev.tank - dynamicDrainStep).toFixed(1));
+          if (nextTank <= 0) {
+            stopTankDrainAnimation();
+          }
+
+          return {
+            ...prev,
+            tank: nextTank,
+            pumping: false,
+            flowRate: 0,
+          };
+        });
+      }, dynamicDrainIntervalMs);
+    }
   };
 
   const mergeDashboardState = (payloadState) => {
     if (!payloadState) return;
 
     setState((prevState) => {
+      const isResetDraining = isResetDrainingRef.current;
       ['f1', 'f2', 'f3'].forEach((fieldKey) => {
         const nextField = payloadState[fieldKey];
         if (!nextField) return;
@@ -121,17 +200,23 @@ const AgricultureDashboard = () => {
         }
       });
 
-      return applyMainTankRules({
+      const mergedState = {
         ...prevState,
-        tank: payloadState.tank ?? prevState.tank,
-        pumping: payloadState.pumping ?? prevState.pumping,
-        flowRate: payloadState.flowRate ?? prevState.flowRate,
+        tank: isResetDraining ? prevState.tank : (payloadState.tank ?? prevState.tank),
+        pumping: isResetDraining ? false : (payloadState.pumping ?? prevState.pumping),
+        flowRate: isResetDraining ? 0 : (payloadState.flowRate ?? prevState.flowRate),
         gh: { ...prevState.gh, ...(payloadState.gh || {}) },
         f1: activeEditFieldsRef.current.f1 ? prevState.f1 : (payloadState.f1 ?? prevState.f1),
         f2: activeEditFieldsRef.current.f2 ? prevState.f2 : (payloadState.f2 ?? prevState.f2),
         f3: activeEditFieldsRef.current.f3 ? prevState.f3 : (payloadState.f3 ?? prevState.f3),
         time: new Date().toLocaleTimeString(),
-      }, prevState);
+      };
+
+      if (isResetDraining) {
+        return mergedState;
+      }
+
+      return applyMainTankRules(mergedState, prevState);
     });
   };
 
@@ -309,6 +394,12 @@ const AgricultureDashboard = () => {
     return () => {
       window.removeEventListener('resize', updateLayout);
       resizeObserver.disconnect();
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      stopTankDrainAnimation();
     };
   }, []);
 

@@ -839,6 +839,8 @@ def terminal_loop():
 def shutdown_backend(server):
     print("\nManual shutdown detected. Resetting backend state to zero and switching irrigation off.")
 
+    control_worker.stop()
+
     reset_state_for_shutdown()
 
     for field_key in ("f1", "f2", "f3"):
@@ -859,7 +861,6 @@ def shutdown_backend(server):
             print(f"[SHUTDOWN ESP SYNC ERROR] {field_key.upper()}: {error}")
 
     main_tank_sensor_worker.stop()
-    control_worker.stop()
     esp_worker.stop()
     plc_worker.stop()
     if close_modbus_controller is not None:

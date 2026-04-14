@@ -261,7 +261,9 @@ def reset_state_for_shutdown():
 
             LOW_MOISTURE_LATCHES[field_key] = False
             PH_CONTROL_LATCHES[field_key] = False
-            MANUAL_IRRIGATION_OVERRIDES[field_key] = None
+            # Hold irrigation OFF while shutdown is in progress so auto-rules
+            # cannot turn it back on from low-moisture values.
+            MANUAL_IRRIGATION_OVERRIDES[field_key] = False
             clear_irrigation_run(field_key)
 
         CURRENT["connected"] = False
