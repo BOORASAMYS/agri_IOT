@@ -3,7 +3,7 @@
   "connected": false,
   "lastError": "/status: HTTP Error 404: Not Found; /data: HTTP Error 404: Not Found; /: HTTP Error 404: Not Found",
   "state": {
-    "tank": 0.0,
+    "tank": 52.0,
     "pumping": false,
     "flowRate": 0.0,
     "gh": {
@@ -13,18 +13,6 @@
       "fireAlert": false
     },
     "f1": {
-      "moisture": 81.6,
-      "ph": 0.0,
-      "wl": 24.5,
-      "n": 0.0,
-      "p": 0.0,
-      "k": 0.0,
-      "irrigation": false,
-      "drain": false,
-      "acid": false,
-      "base": true
-    },
-    "f2": {
       "moisture": 82.3,
       "ph": 0.0,
       "wl": 24.7,
@@ -36,10 +24,22 @@
       "acid": false,
       "base": true
     },
-    "f3": {
-      "moisture": 81.9,
+    "f2": {
+      "moisture": 77.0,
       "ph": 0.0,
-      "wl": 24.6,
+      "wl": 23.1,
+      "n": 0.0,
+      "p": 0.0,
+      "k": 0.0,
+      "irrigation": false,
+      "drain": false,
+      "acid": false,
+      "base": true
+    },
+    "f3": {
+      "moisture": 72.8,
+      "ph": 0.0,
+      "wl": 21.8,
       "n": 0.0,
       "p": 0.0,
       "k": 0.0,

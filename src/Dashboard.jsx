@@ -56,6 +56,10 @@ const createInitialDashboardState = () => applyMainTankRules({
 const clampValue = (value, min, max) => Math.max(min, Math.min(max, value));
 const moistureToWaterLevel = (moisture) => Number(clampValue((moisture / 100) * 30, 0, 30).toFixed(1));
 const waterLevelToMoisture = (waterLevel) => Number(clampValue((waterLevel / 30) * 100, 0, 100).toFixed(1));
+const shouldFieldIrrigateFromMoisture = (moisture, wasIrrigating) => (
+  moisture < IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD
+  || (wasIrrigating && moisture < IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD)
+);
 const percentPerTickToLitersPerMinute = (percentPerTick) => (
   (percentPerTick / 100) * MAIN_TANK_CAPACITY_ML * (60000 / AUTOMATION_TICK_MS) / 1000
 );
@@ -143,7 +147,7 @@ const AgricultureDashboard = () => {
     setIsAutomationEnabled(false);
     stopTankDrainAnimation();
     activeEditFieldsRef.current = {};
-    manualIrrigationOverrideRef.current = { f1: false, f2: false, f3: false };
+    manualIrrigationOverrideRef.current = {};
     lastQueuedPayloadRef.current = {};
     isResetDrainingRef.current = startingTank > 0;
     setState({
@@ -151,12 +155,16 @@ const AgricultureDashboard = () => {
       tank: startingTank,
       pumping: false,
       flowRate: 0,
+      f1: { ...ZERO_DASHBOARD_STATE.f1, irrigation: true },
+      f2: { ...ZERO_DASHBOARD_STATE.f2, irrigation: true },
+      f3: { ...ZERO_DASHBOARD_STATE.f3, irrigation: true },
       time: '',
     });
 
     if (startingTank > 0) {
       tankDrainIntervalRef.current = window.setInterval(() => {
         lastLocalUpdateRef.current = Date.now();
+        markSystemDirty();
         setState((prev) => {
           if (prev.tank <= 0) {
             stopTankDrainAnimation();
@@ -169,6 +177,23 @@ const AgricultureDashboard = () => {
           }
 
           const nextTank = Number(Math.max(0, prev.tank - dynamicDrainStep).toFixed(1));
+          const drainedPercent = Number(Math.max(0, prev.tank - nextTank).toFixed(1));
+
+          const hydrateFieldFromTank = (field) => {
+            const nextMoisture = Number(clampValue((field.moisture ?? 0) + drainedPercent * 1.4, 0, 100).toFixed(1));
+            const nextWaterLevel = moistureToWaterLevel(nextMoisture);
+            const phFromMoisture = 1 + (nextMoisture / 10);
+            const nextPh = Number(clampValue(Math.max(field.ph ?? 0, phFromMoisture), 0, 14).toFixed(2));
+
+            return {
+              ...field,
+              moisture: nextMoisture,
+              wl: nextWaterLevel,
+              ph: nextPh,
+              irrigation: true,
+            };
+          };
+
           if (nextTank <= 0) {
             stopTankDrainAnimation();
           }
@@ -178,6 +203,9 @@ const AgricultureDashboard = () => {
             tank: nextTank,
             pumping: false,
             flowRate: 0,
+            f1: hydrateFieldFromTank(prev.f1),
+            f2: hydrateFieldFromTank(prev.f2),
+            f3: hydrateFieldFromTank(prev.f3),
           };
         });
       }, dynamicDrainIntervalMs);
@@ -670,7 +698,17 @@ const AgricultureDashboard = () => {
       }
       setState((prev) => ({
         ...prev,
-        [fieldKey]: { ...prev[fieldKey], ...patch },
+        [fieldKey]: (() => {
+          const nextField = { ...prev[fieldKey], ...patch };
+          if (
+            Object.prototype.hasOwnProperty.call(patch, 'moisture')
+            || Object.prototype.hasOwnProperty.call(patch, 'wl')
+          ) {
+            const moisture = Number(clampValue(nextField.moisture ?? 0, 0, 100).toFixed(1));
+            nextField.irrigation = shouldFieldIrrigateFromMoisture(moisture, Boolean(prev[fieldKey]?.irrigation));
+          }
+          return nextField;
+        })(),
       }));
     };
     const scheduleFieldPatch = (patch) => {
