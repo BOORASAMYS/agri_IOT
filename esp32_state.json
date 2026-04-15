@@ -8,7 +8,7 @@
     "mainTankManualOverride": false,
     "flowRate": 0.0,
     "gh": {
-      "temp": 20.0,
+      "temp": 38.5,
       "humidity": 52.0,
       "fanOn": false,
       "fireAlert": false
@@ -49,6 +49,6 @@
       "acid": false,
       "base": false
     },
-    "mainTankDataAt": 1776287285.8162117
+    "mainTankDataAt": 1776290209.0199413
   }
 }

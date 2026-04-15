@@ -72,6 +72,8 @@ MAIN_TANK_REFILL_START_PERCENT = 20.0
 MAIN_TANK_SIMULATION_STEP_PERCENT = 2.0
 PLC_OFFLINE_COOLDOWN_SECONDS = float(os.getenv("PLC_OFFLINE_COOLDOWN", "20"))
 MAIN_TANK_SENSOR_ERROR_BACKOFF_SECONDS = float(os.getenv("MAIN_TANK_SENSOR_ERROR_BACKOFF", "20"))
+MAIN_TANK_RELAY_COMMAND_LOCK = threading.Lock()
+MAIN_TANK_LAST_REQUESTED_STATE = None
 
 
 class ConnectionStatusTracker:
@@ -129,6 +131,25 @@ def get_main_tank_pumping_state():
 
         CURRENT["state"]["pumping"] = pumping
         return pumping
+
+
+def queue_main_tank_relay(source="control", wait=False, force=False):
+    global MAIN_TANK_LAST_REQUESTED_STATE
+
+    pumping = get_main_tank_pumping_state()
+    with MAIN_TANK_RELAY_COMMAND_LOCK:
+        if not force and MAIN_TANK_LAST_REQUESTED_STATE is pumping:
+            return {
+                "queued": False,
+                "skipped_unchanged": True,
+                "command": RELAY_COMMANDS["main_tank"][pumping],
+                "source": source,
+                "pumping": pumping,
+            }
+
+        result = plc_worker.enqueue(RELAY_COMMANDS["main_tank"][pumping], source=source, wait=wait)
+        MAIN_TANK_LAST_REQUESTED_STATE = pumping
+        return result
 
 
 class PLCCommandWorker:
@@ -670,8 +691,7 @@ def send_relay_command(command):
 
 
 def sync_main_tank_relay():
-    pumping = get_main_tank_pumping_state()
-    return plc_worker.enqueue(RELAY_COMMANDS["main_tank"][pumping], source="main-tank-sync", wait=True)
+    return queue_main_tank_relay(source="main-tank-sync", wait=True)
 
 
 def sync_field_relay(field_key):
@@ -683,8 +703,7 @@ def sync_field_relay(field_key):
 
 
 def enqueue_main_tank_sync(source="control"):
-    pumping = get_main_tank_pumping_state()
-    return plc_worker.enqueue(RELAY_COMMANDS["main_tank"][pumping], source=source, wait=False)
+    return queue_main_tank_relay(source=source, wait=False)
 
 
 def enqueue_field_relay_sync(field_key, source="control"):
@@ -711,7 +730,7 @@ def set_main_tank_manual_override(pumping, source="control", wait=False):
         connected=False,
         last_error="",
     )
-    return plc_worker.enqueue(RELAY_COMMANDS["main_tank"][requested_pumping], source=source, wait=wait)
+    return queue_main_tank_relay(source=source, wait=wait, force=True)
 
 
 def sync_main_tank_state(
@@ -728,6 +747,7 @@ def sync_main_tank_state(
         with STATE_LOCK:
             current_tank = number_from_value(CURRENT["state"].get("tank"), 0.0)
         state_patch["tank"] = number_from_value(tank, current_tank)
+        state_patch["mainTankDataAt"] = time.time()
 
     if pumping is not None:
         with STATE_LOCK:
@@ -738,8 +758,7 @@ def sync_main_tank_state(
         state_patch["mainTankManualOverride"] = manual_override
 
     update_current({"state": state_patch}, connected=False, last_error="")
-    target_pumping = get_main_tank_pumping_state()
-    return plc_worker.enqueue(RELAY_COMMANDS["main_tank"][target_pumping], source=source, wait=wait)
+    return queue_main_tank_relay(source=source, wait=wait, force=manual_override_provided)
 
 
 def build_patch_from_command(path_tokens, raw_value):
@@ -1089,6 +1108,9 @@ def shutdown_backend(server):
             print(f"[SHUTDOWN RELAY ERROR] {field_key.upper()}: {error}")
 
     try:
+        with MAIN_TANK_RELAY_COMMAND_LOCK:
+            global MAIN_TANK_LAST_REQUESTED_STATE
+            MAIN_TANK_LAST_REQUESTED_STATE = False
         plc_worker.enqueue(RELAY_COMMANDS["main_tank"][False], source="shutdown", wait=True)
     except Exception as error:
         print(f"[SHUTDOWN RELAY ERROR] MAIN TANK MOTOR: {error}")

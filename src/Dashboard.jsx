@@ -244,9 +244,12 @@ const AgricultureDashboard = () => {
     setState((prevState) => {
       const isResetDraining = isResetDrainingRef.current;
       const incomingMainTankDataAt = payloadState.mainTankDataAt ?? null;
-      const hasFreshMainTankData = incomingMainTankDataAt !== null && incomingMainTankDataAt !== lastMainTankDataAtRef.current;
+      const incomingTank = payloadState.tank;
+      const hasFreshMainTankTimestamp = incomingMainTankDataAt !== null && incomingMainTankDataAt !== lastMainTankDataAtRef.current;
+      const hasTankValueChanged = typeof incomingTank === 'number' && incomingTank !== prevState.tank;
+      const hasFreshMainTankData = hasFreshMainTankTimestamp || hasTankValueChanged;
 
-      if (hasFreshMainTankData) {
+      if (hasFreshMainTankTimestamp) {
         lastMainTankDataAtRef.current = incomingMainTankDataAt;
       }
 
@@ -263,7 +266,7 @@ const AgricultureDashboard = () => {
 
       const mergedState = {
         ...prevState,
-        tank: isResetDraining ? prevState.tank : (hasFreshMainTankData ? (payloadState.tank ?? prevState.tank) : prevState.tank),
+        tank: isResetDraining ? prevState.tank : (hasFreshMainTankData ? (incomingTank ?? prevState.tank) : prevState.tank),
         pumping: isResetDraining ? false : (payloadState.pumping ?? prevState.pumping),
         mainTankManualOverride: isResetDraining ? false : (payloadState.mainTankManualOverride ?? prevState.mainTankManualOverride ?? null),
         flowRate: isResetDraining ? 0 : (payloadState.flowRate ?? prevState.flowRate),
