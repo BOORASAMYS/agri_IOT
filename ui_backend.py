@@ -5,6 +5,7 @@ import os
 import queue
 import re
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -895,6 +896,15 @@ class UIBackendHandler(Handler):
     def do_POST(self):
         parsed = urlparse(self.path)
 
+        if parsed.path == "/api/shutdown":
+            if os.name != "posix":
+                self.send_json({"error": "System shutdown is only supported when the backend is running on Raspberry Pi/Linux."}, status=501)
+                return
+
+            self.send_json({"ok": True, "message": "Raspberry Pi shutdown started."})
+            threading.Thread(target=perform_system_shutdown, args=(self.server,), daemon=True).start()
+            return
+
         if parsed.path == "/api/greenhouse":
             try:
                 body = self.read_body()
@@ -1130,6 +1140,16 @@ def shutdown_backend(server):
             print(f"[PLC CLOSE ERROR] {error}")
 
     server.server_close()
+
+
+def perform_system_shutdown(server):
+    time.sleep(0.5)
+    server.shutdown()
+    shutdown_backend(server)
+    try:
+        subprocess.Popen(["sudo", "shutdown", "-h", "now"])
+    except Exception as error:
+        print(f"[SYSTEM SHUTDOWN ERROR] {error}")
 
 
 if __name__ == "__main__":

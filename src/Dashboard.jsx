@@ -11,6 +11,7 @@ const FIELD_ENDPOINTS = {
 };
 const GREENHOUSE_ENDPOINT = `${API_BASE}/greenhouse`;
 const MAIN_TANK_ENDPOINT = `${API_BASE}/main-tank`;
+const SHUTDOWN_ENDPOINT = `${API_BASE}/shutdown`;
 const DRAG_COMMIT_INTERVAL_MS = 90;
 const GREENHOUSE_FAN_TEMP_THRESHOLD = 40;
 const GREENHOUSE_FAN_HUMIDITY_THRESHOLD = 70;
@@ -113,6 +114,7 @@ const AgricultureDashboard = () => {
   const BASE_DASHBOARD_WIDTH = 1480;
   const [state, setState] = useState(createInitialDashboardState);
   const [isAutomationEnabled, setIsAutomationEnabled] = useState(false);
+  const [isShutdownRequested, setIsShutdownRequested] = useState(false);
 
   const [isMounted, setIsMounted] = useState(false);
   const [isLoadingScreenVisible, setIsLoadingScreenVisible] = useState(true);
@@ -634,6 +636,34 @@ const AgricultureDashboard = () => {
     } catch (error) {
       dirtyMainTankRef.current = true;
       console.error(`Failed to send main tank values: ${error.message}`);
+    }
+  };
+
+  const shutdownRaspberryPi = async () => {
+    const shouldShutdown = window.confirm('Shut down the Raspberry Pi now? This will stop the dashboard and connected control services.');
+    if (!shouldShutdown) {
+      return;
+    }
+
+    setIsShutdownRequested(true);
+
+    try {
+      const response = await fetch(SHUTDOWN_ENDPOINT, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
+
+      const payloadFromServer = await response.json();
+
+      if (!response.ok) {
+        throw new Error(payloadFromServer?.error || `HTTP ${response.status}`);
+      }
+    } catch (error) {
+      setIsShutdownRequested(false);
+      window.alert(`Failed to shut down Raspberry Pi: ${error.message}`);
+      console.error(`Failed to shut down Raspberry Pi: ${error.message}`);
     }
   };
 
@@ -1384,6 +1414,52 @@ const AgricultureDashboard = () => {
           background: linear-gradient(135deg, #065f46 0%, #10b981 100%);
         }
 
+        .navbar-action-btn.shutdown {
+          display: inline-flex;
+          align-items: center;
+          gap: 10px;
+          background: linear-gradient(135deg, #7f1d1d 0%, #dc2626 100%);
+          padding-right: 18px;
+          box-shadow: 0 10px 24px rgba(127, 29, 29, 0.3);
+        }
+
+        .navbar-action-btn.shutdown:hover {
+          box-shadow: 0 14px 28px rgba(127, 29, 29, 0.38);
+        }
+
+        .shutdown-power-icon {
+          position: relative;
+          width: 24px;
+          height: 24px;
+          border: 2.5px solid rgba(255, 255, 255, 0.95);
+          border-top-color: transparent;
+          border-radius: 50%;
+          flex: 0 0 auto;
+        }
+
+        .shutdown-power-icon::before {
+          content: '';
+          position: absolute;
+          top: -4px;
+          left: 50%;
+          width: 2.5px;
+          height: 12px;
+          border-radius: 999px;
+          background: rgba(255, 255, 255, 0.95);
+          transform: translateX(-50%);
+          box-shadow: 0 0 10px rgba(255, 255, 255, 0.24);
+        }
+
+        .shutdown-label {
+          letter-spacing: 0.02em;
+        }
+
+        .navbar-action-btn:disabled {
+          cursor: not-allowed;
+          opacity: 0.7;
+          transform: none;
+        }
+
         .top-navbar-logo-box {
           display: flex;
           align-items: center;
@@ -2042,6 +2118,18 @@ const AgricultureDashboard = () => {
                 <img src={cdacLogo} alt="CDAC logo" className="top-navbar-logo" />
               </div>
             </div>
+            <button
+              type="button"
+              className="navbar-action-btn shutdown"
+              onClick={shutdownRaspberryPi}
+              disabled={isShutdownRequested}
+              aria-label="Shut down Raspberry Pi"
+            >
+              <span className="shutdown-power-icon" aria-hidden="true"></span>
+              <span className="shutdown-label">
+                {isShutdownRequested ? 'Shutting Down...' : 'Shutdown Pi'}
+              </span>
+            </button>
           </div>
         </div>
         <div className="quad-grid">
