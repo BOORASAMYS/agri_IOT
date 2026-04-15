@@ -1,6 +1,7 @@
 from copy import deepcopy
 from http.server import ThreadingHTTPServer
 import json
+import os
 import queue
 import re
 import socket
@@ -32,9 +33,13 @@ from esp32connect import (
 try:
     from Agri_iot import close as close_modbus_controller
     from Agri_iot import control as modbus_control
+    from Agri_iot import MODBUS_HOST as PLC_HOST
+    from Agri_iot import MODBUS_PORT as PLC_PORT
 except Exception as import_error:
     close_modbus_controller = None
     modbus_control = None
+    PLC_HOST = "192.168.0.3"
+    PLC_PORT = 502
     MODBUS_IMPORT_ERROR = import_error
 else:
     MODBUS_IMPORT_ERROR = None
@@ -62,10 +67,56 @@ ESP_COMMAND_QUEUE_TIMEOUT_SECONDS = 1.0
 MAIN_TANK_SENSOR_URL = "http://192.168.0.10/tank"
 MAIN_TANK_SENSOR_TIMEOUT_SECONDS = 2
 MAIN_TANK_POLL_INTERVAL_SECONDS = 4.0
+MAIN_TANK_STOP_PERCENT = 100.0
+MAIN_TANK_REFILL_START_PERCENT = 20.0
+MAIN_TANK_SIMULATION_STEP_PERCENT = 2.0
+PLC_OFFLINE_COOLDOWN_SECONDS = float(os.getenv("PLC_OFFLINE_COOLDOWN", "20"))
+MAIN_TANK_SENSOR_ERROR_BACKOFF_SECONDS = float(os.getenv("MAIN_TANK_SENSOR_ERROR_BACKOFF", "20"))
+
+
+class ConnectionStatusTracker:
+    def __init__(self, label):
+        self.label = label
+        self._failures = {}
+        self._lock = threading.Lock()
+
+    def report_success(self, key, detail):
+        with self._lock:
+            if self._failures.pop(key, None):
+                print(f"[{self.label} RECOVERED] {detail}")
+
+    def report_failure(self, key, detail):
+        with self._lock:
+            failure_count = self._failures.get(key, 0) + 1
+            self._failures[key] = failure_count
+        if failure_count == 1:
+            print(f"[{self.label} ERROR] {detail}")
+        elif failure_count % 10 == 0:
+            print(f"[{self.label} ERROR] {detail} (repeated {failure_count} times)")
+
+
+def should_main_tank_pump(tank, was_pumping=False):
+    normalized_tank = number_from_value(tank, 0.0)
+    return (
+        normalized_tank < MAIN_TANK_REFILL_START_PERCENT
+        or (bool_from_value(was_pumping) and normalized_tank < MAIN_TANK_STOP_PERCENT)
+    )
 
 
 def format_worker_error(error):
     return f"{type(error).__name__}: {error}"
+
+
+def get_main_tank_pumping_state():
+    with STATE_LOCK:
+        manual_override = CURRENT["state"].get("mainTankManualOverride")
+        if isinstance(manual_override, bool):
+            pumping = manual_override
+        else:
+            tank = number_from_value(CURRENT["state"]["tank"], 0.0)
+            pumping = should_main_tank_pump(tank, CURRENT["state"].get("pumping"))
+        CURRENT["state"]["pumping"] = pumping
+        return pumping
 
 
 class PLCCommandWorker:
@@ -73,6 +124,8 @@ class PLCCommandWorker:
         self._queue = queue.Queue()
         self._stop_event = threading.Event()
         self._thread = threading.Thread(target=self._run, name="plc-worker", daemon=True)
+        self._status = ConnectionStatusTracker("PLC WORKER")
+        self._offline_until = 0.0
 
     def start(self):
         self._thread.start()
@@ -117,11 +170,27 @@ class PLCCommandWorker:
                 break
 
             try:
+                now = time.time()
+                if now < self._offline_until:
+                    remaining = max(0.0, self._offline_until - now)
+                    raise ConnectionError(
+                        f"Skipping PLC retry for {remaining:.1f}s after recent connection failure"
+                    )
                 result = send_relay_command(message["command"])
                 message["result"] = result
+                self._offline_until = 0.0
+                self._status.report_success(
+                    "plc",
+                    f"{message['command']} -> {PLC_HOST}:{PLC_PORT}",
+                )
             except Exception as error:
                 message["error"] = error
-                print(f"[PLC WORKER ERROR] {message['command']}: {format_worker_error(error)}")
+                if isinstance(error, ConnectionError):
+                    self._offline_until = time.time() + PLC_OFFLINE_COOLDOWN_SECONDS
+                self._status.report_failure(
+                    "plc",
+                    f"{message['command']} -> {PLC_HOST}:{PLC_PORT}: {format_worker_error(error)}",
+                )
             finally:
                 if message["event"] is not None:
                     message["event"].set()
@@ -137,6 +206,7 @@ class ESPCommandWorker:
         adapter = requests.adapters.HTTPAdapter(pool_connections=8, pool_maxsize=8)
         self._session.mount("http://", adapter)
         self._last_request_at = 0.0
+        self._status = ConnectionStatusTracker("ESP WORKER")
 
     def start(self):
         self._thread.start()
@@ -212,9 +282,16 @@ class ESPCommandWorker:
                 else:
                     result = self._send_payload(message["esp_num"], message["payload"])
                 message["result"] = result
+                self._status.report_success(
+                    message["esp_num"],
+                    f"ESP{message['esp_num']} -> {ESP_DEVICES[message['esp_num']]}",
+                )
             except Exception as error:
                 message["error"] = error
-                print(f"[ESP WORKER ERROR] ESP{message['esp_num']}: {format_worker_error(error)}")
+                self._status.report_failure(
+                    message["esp_num"],
+                    f"ESP{message['esp_num']} -> {ESP_DEVICES.get(message['esp_num'], 'unknown')}: {format_worker_error(error)}",
+                )
             finally:
                 if message["event"] is not None:
                     message["event"].set()
@@ -322,6 +399,8 @@ class MainTankSensorWorker:
         self._stop_event = threading.Event()
         self._thread = threading.Thread(target=self._run, name="main-tank-worker", daemon=True)
         self._session = requests.Session()
+        self._status = ConnectionStatusTracker("MAIN TANK SENSOR")
+        self._error_backoff_until = 0.0
 
     def start(self):
         self._thread.start()
@@ -333,11 +412,32 @@ class MainTankSensorWorker:
 
     def _run(self):
         while not self._stop_event.is_set():
+            now = time.time()
+            if now < self._error_backoff_until:
+                self._stop_event.wait(self._error_backoff_until - now)
+                continue
+
             try:
                 tank_level = self._fetch_tank_level()
-                update_current({"state": {"tank": tank_level}})
+                update_current({"state": {"tank": tank_level, "mainTankDataAt": time.time()}})
+                self._error_backoff_until = 0.0
+                self._status.report_success("sensor", MAIN_TANK_SENSOR_URL)
+                try:
+                    enqueue_main_tank_sync(source="main-tank-sensor")
+                except Exception as error:
+                    print(f"[MAIN TANK RELAY ERROR] {format_worker_error(error)}")
             except Exception as error:
-                print(f"[MAIN TANK SENSOR ERROR] {format_worker_error(error)}")
+                self._status.report_failure("sensor", f"{MAIN_TANK_SENSOR_URL}: {format_worker_error(error)}")
+                self._error_backoff_until = time.time() + MAIN_TANK_SENSOR_ERROR_BACKOFF_SECONDS
+                with STATE_LOCK:
+                    current_tank = number_from_value(CURRENT["state"].get("tank"), 0.0)
+                if current_tank < MAIN_TANK_STOP_PERCENT:
+                    fallback_tank = round(min(MAIN_TANK_STOP_PERCENT, current_tank + MAIN_TANK_SIMULATION_STEP_PERCENT), 1)
+                    update_current({"state": {"tank": fallback_tank, "mainTankDataAt": time.time()}})
+                    try:
+                        enqueue_main_tank_sync(source="main-tank-fallback")
+                    except Exception as relay_error:
+                        print(f"[MAIN TANK RELAY ERROR] {format_worker_error(relay_error)}")
             self._stop_event.wait(MAIN_TANK_POLL_INTERVAL_SECONDS)
 
     def _fetch_tank_level(self):
@@ -535,8 +635,7 @@ def send_relay_command(command):
 
 
 def sync_main_tank_relay():
-    with STATE_LOCK:
-        pumping = bool(CURRENT["state"]["pumping"])
+    pumping = get_main_tank_pumping_state()
     return plc_worker.enqueue(RELAY_COMMANDS["main_tank"][pumping], source="main-tank-sync", wait=True)
 
 
@@ -549,8 +648,7 @@ def sync_field_relay(field_key):
 
 
 def enqueue_main_tank_sync(source="control"):
-    with STATE_LOCK:
-        pumping = bool(CURRENT["state"]["pumping"])
+    pumping = get_main_tank_pumping_state()
     return plc_worker.enqueue(RELAY_COMMANDS["main_tank"][pumping], source=source, wait=False)
 
 
@@ -564,6 +662,49 @@ def enqueue_field_relay_sync(field_key, source="control"):
 
 def enqueue_esp_sync(esp_num, source="control"):
     return esp_worker.enqueue_sync(esp_num, source=source, wait=False)
+
+
+def set_main_tank_manual_override(pumping, source="control", wait=False):
+    requested_pumping = bool_from_value(pumping)
+    update_current(
+        {
+            "state": {
+                "pumping": requested_pumping,
+                "mainTankManualOverride": requested_pumping,
+            }
+        },
+        connected=False,
+        last_error="",
+    )
+    return plc_worker.enqueue(RELAY_COMMANDS["main_tank"][requested_pumping], source=source, wait=wait)
+
+
+def sync_main_tank_state(
+    tank=None,
+    pumping=None,
+    manual_override=None,
+    manual_override_provided=False,
+    source="control",
+    wait=False,
+):
+    state_patch = {}
+
+    if tank is not None:
+        with STATE_LOCK:
+            current_tank = number_from_value(CURRENT["state"].get("tank"), 0.0)
+        state_patch["tank"] = number_from_value(tank, current_tank)
+
+    if pumping is not None:
+        with STATE_LOCK:
+            current_pumping = bool(CURRENT["state"].get("pumping"))
+        state_patch["pumping"] = bool_from_value(pumping) if pumping is not None else current_pumping
+
+    if manual_override_provided:
+        state_patch["mainTankManualOverride"] = manual_override
+
+    update_current({"state": state_patch}, connected=False, last_error="")
+    target_pumping = get_main_tank_pumping_state()
+    return plc_worker.enqueue(RELAY_COMMANDS["main_tank"][target_pumping], source=source, wait=wait)
 
 
 def build_patch_from_command(path_tokens, raw_value):
@@ -645,14 +786,17 @@ def handle_terminal_command(command):
             raise ValueError("Use 'set <path> <value>'")
         path_tokens = parts[1:-1]
         raw_value = parts[-1]
-        patch = build_patch_from_command(path_tokens, raw_value)
-        update_current(patch, connected=False, last_error="")
+        if path_tokens and path_tokens[0] == "pumping":
+            requested_pumping = bool_from_value(raw_value)
+        else:
+            patch = build_patch_from_command(path_tokens, raw_value)
+            update_current(patch, connected=False, last_error="")
         relay_target = path_tokens[0] if path_tokens and path_tokens[0] in {"f1", "f2", "f3"} else None
         if relay_target is not None:
             enqueue_field_relay_sync(relay_target, source="terminal")
             enqueue_main_tank_sync(source="terminal")
         if path_tokens and path_tokens[0] == "pumping":
-            enqueue_main_tank_sync(source="terminal")
+            set_main_tank_manual_override(requested_pumping, source="terminal", wait=False)
         print("\nValue updated from terminal")
         print_selected_values()
         return
@@ -746,6 +890,65 @@ class UIBackendHandler(Handler):
             except Exception as error:
                 response_payload["warning"] = f"Saved locally, but ESP sync failed: {error}"
 
+            self.send_json(response_payload)
+            return
+
+        if parsed.path == "/api/main-tank":
+            try:
+                body = self.read_body()
+            except json.JSONDecodeError:
+                self.send_json({"error": "Invalid JSON body"}, status=400)
+                return
+
+            if not isinstance(body, dict):
+                self.send_json({"error": "Invalid main tank body"}, status=400)
+                return
+
+            incoming = body.get("values") if isinstance(body.get("values"), dict) else body
+            if "pumping" not in incoming and "tank" not in incoming:
+                self.send_json({"error": "No main tank values provided"}, status=400)
+                return
+
+            requested_tank = None
+            if "tank" in incoming:
+                with STATE_LOCK:
+                    current_tank = number_from_value(CURRENT["state"].get("tank"), 0.0)
+                requested_tank = number_from_value(incoming.get("tank"), current_tank)
+
+            requested_pumping = None
+            if "pumping" in incoming:
+                requested_pumping = bool_from_value(incoming.get("pumping"))
+
+            manual_override_provided = "mainTankManualOverride" in incoming
+            manual_override = incoming.get("mainTankManualOverride") if manual_override_provided else None
+            if manual_override_provided and manual_override is not None:
+                manual_override = bool_from_value(manual_override)
+
+            response_payload = {
+                "ok": True,
+                "saved": True,
+                "mainTank": {
+                    "tank": requested_tank,
+                    "pumping": requested_pumping,
+                    "queued": False,
+                },
+                "dashboard": CURRENT,
+            }
+
+            try:
+                sync_main_tank_state(
+                    tank=requested_tank,
+                    pumping=requested_pumping,
+                    manual_override=manual_override,
+                    manual_override_provided=manual_override_provided,
+                    source="main-tank-api",
+                    wait=True,
+                )
+                response_payload["mainTank"]["queued"] = True
+            except Exception as error:
+                response_payload["relayWarning"] = f"Saved locally, but relay sync failed: {error}"
+
+            response_payload["dashboard"] = CURRENT
             self.send_json(response_payload)
             return
 

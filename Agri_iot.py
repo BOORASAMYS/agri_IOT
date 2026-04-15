@@ -1,10 +1,20 @@
+import logging
+import os
 import threading
 import time
 
 import pymodbus.client  # type: ignore
 
-MODBUS_HOST = "192.168.0.50"
-MODBUS_PORT = 502
+# Keep the PLC target in one place and allow an override for deployments.
+MODBUS_HOST = os.getenv("PLC_IP", "192.168.0.3")
+MODBUS_PORT = int(os.getenv("PLC_PORT", "502"))
+MODBUS_RECONNECT_DELAY = float(os.getenv("PLC_RECONNECT_DELAY", "5"))
+MODBUS_TIMEOUT_SECONDS = float(os.getenv("PLC_TIMEOUT", "2"))
+
+# Pymodbus logs every failed socket connect at ERROR level, which floods the
+# console when the PLC is temporarily offline. The worker already reports
+# connection failures, so keep the library logger quiet here.
+logging.getLogger("pymodbus").setLevel(logging.CRITICAL)
 
 COMMAND_MAPPING = {
     "r1on": (0, True),
@@ -24,8 +34,8 @@ class PLCController:
         self,
         host=MODBUS_HOST,
         port=MODBUS_PORT,
-        reconnect_delay=2.0,
-        operation_timeout=3.0,
+        reconnect_delay=MODBUS_RECONNECT_DELAY,
+        operation_timeout=MODBUS_TIMEOUT_SECONDS,
     ):
         self.host = host
         self.port = port
@@ -39,6 +49,8 @@ class PLCController:
         return pymodbus.client.ModbusTcpClient(
             self.host,
             port=self.port,
+            reconnect_delay=self.reconnect_delay,
+            retries=1,
             timeout=self.operation_timeout,
         )
 

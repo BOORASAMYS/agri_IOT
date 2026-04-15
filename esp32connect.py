@@ -18,6 +18,8 @@ IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD = 30.0
 IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD = 60.0
 IRRIGATION_PH_TARGET = 7.0
 IRRIGATION_PH_STEP_PER_TICK = 0.1
+MAIN_TANK_STOP_PERCENT = 100.0
+MAIN_TANK_REFILL_START_PERCENT = 20.0
 GREENHOUSE_FAN_TEMP_THRESHOLD = 40.0
 GREENHOUSE_FAN_HUMIDITY_THRESHOLD = 70.0
 GREENHOUSE_TEMP_MIN = 20.0
@@ -32,6 +34,7 @@ DEFAULT_STATE = {
     "state": {
         "tank": 41,
         "pumping": False,
+        "mainTankManualOverride": None,
         "flowRate": 0.0,
         "gh": {"temp": 35, "humidity": 65},
         "f1": {
@@ -152,6 +155,33 @@ def ph_to_moisture(ph):
     return round(max(0.0, min(100.0, (normalized_ph - 1.0) * 10.0)), 1)
 
 
+def get_ph_chemical_state(ph):
+    normalized_ph = number_from_value(ph, IRRIGATION_PH_TARGET)
+    return {
+        "acid": normalized_ph < IRRIGATION_PH_TARGET,
+        "base": normalized_ph > IRRIGATION_PH_TARGET,
+    }
+
+
+def should_main_tank_pump(tank, was_pumping=False):
+    normalized_tank = number_from_value(tank, 0.0)
+    return (
+        normalized_tank < MAIN_TANK_REFILL_START_PERCENT
+        or (bool_from_value(was_pumping) and normalized_tank < MAIN_TANK_STOP_PERCENT)
+    )
+
+
+def resolve_main_tank_pumping(state):
+    state_values = state.get("state", {}) if isinstance(state, dict) else {}
+    manual_override = state_values.get("mainTankManualOverride")
+    if isinstance(manual_override, bool):
+        return manual_override
+    return should_main_tank_pump(
+        state_values.get("tank"),
+        state_values.get("pumping"),
+    )
+
+
 def should_auto_irrigate(field_key, field):
     moisture = number_from_value(field.get("moisture"), IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD)
     return moisture < IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD
@@ -219,13 +249,11 @@ def initialize_irrigation_runtime(state):
         LOW_MOISTURE_LATCHES[field_key] = False
         PH_CONTROL_LATCHES[field_key] = False
         MANUAL_IRRIGATION_OVERRIDES[field_key] = None
+        field.update(get_ph_chemical_state(field.get("ph")))
 
         clear_irrigation_run(field_key)
 
-    state["state"]["pumping"] = any(
-        bool_from_value(state.get("state", {}).get(field_key, {}).get("irrigation"))
-        for field_key in ("f1", "f2", "f3")
-    )
+    state["state"]["pumping"] = resolve_main_tank_pumping(state)
     return state
 
 
@@ -244,6 +272,7 @@ def reset_state_for_shutdown():
         state = CURRENT.get("state", {})
         state["tank"] = 0.0
         state["pumping"] = False
+        state["mainTankManualOverride"] = False
         state["flowRate"] = 0.0
 
         for field_key in ("f1", "f2", "f3"):
@@ -492,10 +521,10 @@ def update_current(patch, connected=None, last_error=None, field_metadata=None):
     with STATE_LOCK:
         now = time.time()
         merged = apply_greenhouse_rules(deep_merge(CURRENT, patch))
+        state_patch = patch.get("state", {}) if isinstance(patch.get("state"), dict) else {}
 
         for field_key in ("f1", "f2", "f3"):
             field = merged["state"][field_key]
-            state_patch = patch.get("state", {}) if isinstance(patch.get("state"), dict) else {}
             field_patch = state_patch.get(field_key, {}) if isinstance(state_patch.get(field_key), dict) else {}
             metadata = (field_metadata or {}).get(field_key, {})
             sensor_update_present = any(key in field_patch for key in ("moisture", "wl", "ph", "n", "p", "k"))
@@ -519,15 +548,23 @@ def update_current(patch, connected=None, last_error=None, field_metadata=None):
 
             LOW_MOISTURE_LATCHES[field_key] = desired_auto_reason == "moisture"
             PH_CONTROL_LATCHES[field_key] = False
-            field["acid"] = number_from_value(field.get("ph"), IRRIGATION_PH_TARGET) > IRRIGATION_PH_TARGET
-            field["base"] = number_from_value(field.get("ph"), IRRIGATION_PH_TARGET) < IRRIGATION_PH_TARGET
+            field.update(get_ph_chemical_state(field.get("ph")))
 
             if field["irrigation"]:
                 set_irrigation_run(field_key, desired_auto_reason or "manual", field, now=now)
             else:
                 clear_irrigation_run(field_key)
 
-        merged["state"]["pumping"] = any(merged["state"][field_key]["irrigation"] for field_key in ("f1", "f2", "f3"))
+        if "mainTankManualOverride" in state_patch:
+            manual_override = state_patch.get("mainTankManualOverride")
+            if isinstance(manual_override, bool):
+                merged["state"]["mainTankManualOverride"] = manual_override
+            elif manual_override is None:
+                merged["state"]["mainTankManualOverride"] = None
+            else:
+                merged["state"]["mainTankManualOverride"] = bool_from_value(manual_override)
+
+        merged["state"]["pumping"] = resolve_main_tank_pumping(merged)
         CURRENT.clear()
         CURRENT.update(merged)
         if connected is not None:
@@ -583,8 +620,7 @@ def simulation_loop():
 
                 LOW_MOISTURE_LATCHES[field_key] = desired_auto_reason == "moisture"
                 PH_CONTROL_LATCHES[field_key] = False
-                field["acid"] = number_from_value(field.get("ph"), IRRIGATION_PH_TARGET) > IRRIGATION_PH_TARGET
-                field["base"] = number_from_value(field.get("ph"), IRRIGATION_PH_TARGET) < IRRIGATION_PH_TARGET
+                field.update(get_ph_chemical_state(field.get("ph")))
 
                 if should_irrigate:
                     set_irrigation_run(field_key, desired_auto_reason or "manual", field, now=now)
@@ -593,9 +629,7 @@ def simulation_loop():
 
             if dirty:
                 apply_greenhouse_rules(CURRENT)
-                CURRENT["state"]["pumping"] = any(
-                    CURRENT["state"][field_key]["irrigation"] for field_key in ("f1", "f2", "f3")
-                )
+                CURRENT["state"]["pumping"] = resolve_main_tank_pumping(CURRENT)
                 save_state()
 
 

@@ -10,6 +10,7 @@ const FIELD_ENDPOINTS = {
   f3: `${API_BASE}/fields/f3`,
 };
 const GREENHOUSE_ENDPOINT = `${API_BASE}/greenhouse`;
+const MAIN_TANK_ENDPOINT = `${API_BASE}/main-tank`;
 const DRAG_COMMIT_INTERVAL_MS = 90;
 const GREENHOUSE_FAN_TEMP_THRESHOLD = 40;
 const GREENHOUSE_FAN_HUMIDITY_THRESHOLD = 70;
@@ -22,21 +23,28 @@ const MAIN_TANK_DRAIN_INTERVAL_MS = 1200;
 const AUTOMATION_TICK_MS = 1200;
 const IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD = 30;
 const IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD = 60;
-const MAIN_TANK_HIGH_FILL_PERCENT_PER_TICK = 1.0;
-const MAIN_TANK_LOW_FILL_PERCENT_PER_TICK = 0.5;
+const MAIN_TANK_HIGH_FILL_PERCENT_PER_TICK = 2.0;
+const MAIN_TANK_LOW_FILL_PERCENT_PER_TICK = 2.0;
+const PH_TARGET = 7;
+const getPhChemicalState = (ph) => ({
+  acid: ph < PH_TARGET,
+  base: ph > PH_TARGET,
+});
 const INITIAL_DASHBOARD_STATE = {
   tank: 100,
   pumping: true,
+  mainTankManualOverride: null,
   flowRate: 2.4,
   gh: { temp: 35, humidity: 65, fireAlert: false, fanOn: false },
   f1: { moisture: 62.4, ph: 6.81, wl: 21.3, n: 42, p: 35, k: 55, irrigation: true, drain: true, acid: true, base: false },
-  f2: { moisture: 60.8, ph: 8.10, wl: 13.3, n: 38, p: 28, k: 48, irrigation: false, drain: false, acid: false, base: false },
-  f3: { moisture: 24, ph: 3.2, wl: 8.5, n: 22, p: 18, k: 31, irrigation: true, drain: false, acid: false, base: true },
+  f2: { moisture: 60.8, ph: 8.10, wl: 13.3, n: 38, p: 28, k: 48, irrigation: false, drain: false, acid: false, base: true },
+  f3: { moisture: 24, ph: 3.2, wl: 8.5, n: 22, p: 18, k: 31, irrigation: true, drain: false, acid: true, base: false },
 };
 
 const ZERO_DASHBOARD_STATE = {
   tank: 0,
   pumping: false,
+  mainTankManualOverride: null,
   flowRate: 0,
   gh: { temp: 0, humidity: 0, fireAlert: false, fanOn: false },
   f1: { moisture: 0, ph: 0, wl: 0, n: 0, p: 0, k: 0, irrigation: false, drain: false, acid: false, base: false },
@@ -47,9 +55,9 @@ const ZERO_DASHBOARD_STATE = {
 const createInitialDashboardState = () => applyMainTankRules({
   ...INITIAL_DASHBOARD_STATE,
   gh: { ...INITIAL_DASHBOARD_STATE.gh },
-  f1: { ...INITIAL_DASHBOARD_STATE.f1 },
-  f2: { ...INITIAL_DASHBOARD_STATE.f2 },
-  f3: { ...INITIAL_DASHBOARD_STATE.f3 },
+  f1: { ...INITIAL_DASHBOARD_STATE.f1, ...getPhChemicalState(INITIAL_DASHBOARD_STATE.f1.ph) },
+  f2: { ...INITIAL_DASHBOARD_STATE.f2, ...getPhChemicalState(INITIAL_DASHBOARD_STATE.f2.ph) },
+  f3: { ...INITIAL_DASHBOARD_STATE.f3, ...getPhChemicalState(INITIAL_DASHBOARD_STATE.f3.ph) },
   time: '',
 });
 
@@ -63,13 +71,19 @@ const shouldFieldIrrigateFromMoisture = (moisture, wasIrrigating) => (
 const percentPerTickToLitersPerMinute = (percentPerTick) => (
   (percentPerTick / 100) * MAIN_TANK_CAPACITY_ML * (60000 / AUTOMATION_TICK_MS) / 1000
 );
+const isMainTankPumpOn = (tank, wasPumping = false) => (
+  tank < MAIN_TANK_REFILL_START_PERCENT
+  || (wasPumping && tank < 100)
+);
 const applyMainTankRules = (nextState, previousState = nextState) => {
   const tank = nextState.tank ?? previousState.tank ?? 0;
-  const basePumping = typeof nextState.pumping === 'boolean'
-    ? nextState.pumping
-    : Boolean(previousState.pumping);
-  const shouldStartRefill = tank <= MAIN_TANK_REFILL_START_PERCENT;
-  const pumping = tank >= 100 ? false : (basePumping ? tank < 100 : shouldStartRefill);
+  const previousPumping = Boolean(previousState?.pumping);
+  const manualOverride = typeof nextState.mainTankManualOverride === 'boolean'
+    ? nextState.mainTankManualOverride
+    : previousState?.mainTankManualOverride;
+  const pumping = typeof manualOverride === 'boolean'
+    ? manualOverride
+    : isMainTankPumpOn(tank, previousPumping);
   const refillPercentPerTick = pumping
     ? (tank >= MAIN_TANK_FLOW_REDUCE_PERCENT ? MAIN_TANK_LOW_FILL_PERCENT_PER_TICK : MAIN_TANK_HIGH_FILL_PERCENT_PER_TICK)
     : 0;
@@ -77,6 +91,7 @@ const applyMainTankRules = (nextState, previousState = nextState) => {
   return {
     ...nextState,
     tank,
+    mainTankManualOverride: typeof manualOverride === 'boolean' ? manualOverride : null,
     pumping,
     flowRate: Number(percentPerTickToLitersPerMinute(refillPercentPerTick).toFixed(1)),
   };
@@ -103,11 +118,13 @@ const AgricultureDashboard = () => {
   const lastQueuedPayloadRef = useRef({});
   const dirtyFieldsRef = useRef({});
   const dirtyGreenhouseRef = useRef(false);
+  const dirtyMainTankRef = useRef(false);
   const lastLocalUpdateRef = useRef(0);
   const activeEditFieldsRef = useRef({});
   const manualIrrigationOverrideRef = useRef({});
   const tankDrainIntervalRef = useRef(null);
   const isResetDrainingRef = useRef(false);
+  const lastMainTankDataAtRef = useRef(null);
 
   const stopTankDrainAnimation = () => {
     if (tankDrainIntervalRef.current !== null) {
@@ -120,6 +137,10 @@ const AgricultureDashboard = () => {
   const markSystemDirty = () => {
     dirtyFieldsRef.current = { f1: true, f2: true, f3: true };
     dirtyGreenhouseRef.current = true;
+  };
+
+  const markMainTankDirty = () => {
+    dirtyMainTankRef.current = true;
   };
 
   const resetDashboard = () => {
@@ -217,6 +238,13 @@ const AgricultureDashboard = () => {
 
     setState((prevState) => {
       const isResetDraining = isResetDrainingRef.current;
+      const incomingMainTankDataAt = payloadState.mainTankDataAt ?? null;
+      const hasFreshMainTankData = incomingMainTankDataAt !== null && incomingMainTankDataAt !== lastMainTankDataAtRef.current;
+
+      if (hasFreshMainTankData) {
+        lastMainTankDataAtRef.current = incomingMainTankDataAt;
+      }
+
       ['f1', 'f2', 'f3'].forEach((fieldKey) => {
         const nextField = payloadState[fieldKey];
         if (!nextField) return;
@@ -230,8 +258,9 @@ const AgricultureDashboard = () => {
 
       const mergedState = {
         ...prevState,
-        tank: isResetDraining ? prevState.tank : (payloadState.tank ?? prevState.tank),
+        tank: isResetDraining ? prevState.tank : (hasFreshMainTankData ? (payloadState.tank ?? prevState.tank) : prevState.tank),
         pumping: isResetDraining ? false : (payloadState.pumping ?? prevState.pumping),
+        mainTankManualOverride: isResetDraining ? false : (payloadState.mainTankManualOverride ?? prevState.mainTankManualOverride ?? null),
         flowRate: isResetDraining ? 0 : (payloadState.flowRate ?? prevState.flowRate),
         gh: { ...prevState.gh, ...(payloadState.gh || {}) },
         f1: activeEditFieldsRef.current.f1 ? prevState.f1 : (payloadState.f1 ?? prevState.f1),
@@ -289,13 +318,12 @@ const AgricultureDashboard = () => {
             100
           );
           const nextWaterLevel = moistureToWaterLevel(nextMoisture);
-          const phTarget = 6.6 + index * 0.1;
-          const acid = field.ph > phTarget + 0.45;
-          const base = field.ph < phTarget - 0.45;
+          const phTarget = PH_TARGET;
+          const { acid, base } = getPhChemicalState(field.ph);
           const nextPh = acid
-            ? field.ph - 0.08
+            ? field.ph + 0.08
             : base
-              ? field.ph + 0.08
+              ? field.ph - 0.08
               : moveToward(field.ph, phTarget, 0.03, 2);
 
           nextFields[fieldKey] = activeEditFieldsRef.current[fieldKey]
@@ -315,19 +343,7 @@ const AgricultureDashboard = () => {
               };
         });
 
-        const currentMainTankState = applyMainTankRules(prev, prev);
-        const refillPercentPerTick = currentMainTankState.pumping
-          ? (prev.tank >= MAIN_TANK_FLOW_REDUCE_PERCENT ? MAIN_TANK_LOW_FILL_PERCENT_PER_TICK : MAIN_TANK_HIGH_FILL_PERCENT_PER_TICK)
-          : 0;
-        const nextTank = clampValue(
-          Number((prev.tank + refillPercentPerTick - activeIrrigationCount * 0.5).toFixed(1)),
-          0,
-          100
-        );
-        const derivedMainTankState = applyMainTankRules({
-          ...prev,
-          tank: nextTank,
-        }, prev);
+        const derivedMainTankState = applyMainTankRules(prev, prev);
         const nextTemp = derivedMainTankState.pumping
           ? moveToward(prev.gh.temp, 31, 0.4, 1)
           : moveToward(prev.gh.temp, 38, 0.3, 1);
@@ -542,6 +558,12 @@ const AgricultureDashboard = () => {
     fireAlert: state.gh.fireAlert,
   });
 
+  const buildMainTankPayload = () => ({
+    tank: state.tank,
+    pumping: state.pumping,
+    mainTankManualOverride: state.mainTankManualOverride,
+  });
+
   const updateGreenhouse = (patch) => {
     lastLocalUpdateRef.current = Date.now();
     dirtyGreenhouseRef.current = true;
@@ -579,6 +601,34 @@ const AgricultureDashboard = () => {
     }
   };
 
+  const sendMainTankToServer = async (payload) => {
+    lastLocalUpdateRef.current = Date.now();
+
+    try {
+      const response = await fetch(MAIN_TANK_ENDPOINT, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      });
+
+      const payloadFromServer = await response.json();
+      mergeDashboardState(payloadFromServer?.dashboard?.state);
+
+      if (!response.ok) {
+        throw new Error(payloadFromServer?.error || `HTTP ${response.status}`);
+      }
+
+      if (payloadFromServer?.warning || payloadFromServer?.relayWarning) {
+        console.warn(payloadFromServer.warning || payloadFromServer.relayWarning);
+      }
+    } catch (error) {
+      dirtyMainTankRef.current = true;
+      console.error(`Failed to send main tank values: ${error.message}`);
+    }
+  };
+
   useEffect(() => {
     ['f1', 'f2', 'f3'].forEach((fieldKey) => {
       const payload = buildFieldPayload(fieldKey);
@@ -607,6 +657,15 @@ const AgricultureDashboard = () => {
     dirtyGreenhouseRef.current = false;
     sendGreenhouseToServer(buildGreenhousePayload());
   }, [state.gh]);
+
+  useEffect(() => {
+    if (!dirtyMainTankRef.current) {
+      return;
+    }
+
+    dirtyMainTankRef.current = false;
+    sendMainTankToServer(buildMainTankPayload());
+  }, [state.tank, state.pumping, state.mainTankManualOverride]);
 
   const StatusChip = ({ on, label, onClick, activeColor = '#16a34a' }) => (
     <span
@@ -706,6 +765,9 @@ const AgricultureDashboard = () => {
           ) {
             const moisture = Number(clampValue(nextField.moisture ?? 0, 0, 100).toFixed(1));
             nextField.irrigation = shouldFieldIrrigateFromMoisture(moisture, Boolean(prev[fieldKey]?.irrigation));
+          }
+          if (Object.prototype.hasOwnProperty.call(patch, 'ph')) {
+            Object.assign(nextField, getPhChemicalState(nextField.ph ?? PH_TARGET));
           }
           return nextField;
         })(),
@@ -814,7 +876,7 @@ const AgricultureDashboard = () => {
       const rect = phTrackRef.current.getBoundingClientRect();
       const pct = clamp((clientX - rect.left) / rect.width, 0, 1);
       const next = Number((pct * 14).toFixed(2));
-      setLivePatch({ ph: next });
+      setLivePatch({ ph: next, ...getPhChemicalState(next) });
       scheduleFieldPatch({ ph: next });
     };
     const setWaterLevelFromPointer = (clientY) => {
@@ -1993,23 +2055,19 @@ const AgricultureDashboard = () => {
               <div className="col">
                 <div
                   style={{ width: '62px', height: '62px', borderRadius: '50%', border: '2px solid #94a3b8', display: 'flex', alignItems: 'center', justifyContent: 'center', background: state.pumping ? 'radial-gradient(circle at 35% 35%, #f0f9ff 0%, #bfdbfe 62%, #7dd3fc 100%)' : 'radial-gradient(circle at 35% 35%, #fff1f2 0%, #fecdd3 62%, #fda4af 100%)', boxShadow: state.pumping ? '0 10px 22px rgba(14, 165, 233, 0.22)' : '0 8px 18px rgba(244, 63, 94, 0.14)', transition: 'background 0.8s, box-shadow 0.3s', cursor: 'pointer' }}
-                  onClick={() =>
+                  onClick={() => {
+                    lastLocalUpdateRef.current = Date.now();
+                    markMainTankDirty();
                     setState((prev) => {
-                      const pumping = prev.tank >= 100 ? false : !prev.pumping;
-                      return {
+                      const nextPumping = !prev.pumping;
+                      return applyMainTankRules({
                         ...prev,
-                        pumping,
-                        flowRate: pumping
-                          ? Number(percentPerTickToLitersPerMinute(
-                              prev.tank >= MAIN_TANK_FLOW_REDUCE_PERCENT
-                                ? MAIN_TANK_LOW_FILL_PERCENT_PER_TICK
-                                : MAIN_TANK_HIGH_FILL_PERCENT_PER_TICK
-                            ).toFixed(1))
-                          : 0,
-                      };
-                    })
-                  }
-                  title="Toggle pump"
+                        pumping: nextPumping,
+                        mainTankManualOverride: nextPumping,
+                      }, prev);
+                    });
+                  }}
+                  title="Toggle main tank motor"
                 >
                   <svg width="48" height="48" viewBox="0 0 56 56" aria-hidden="true">
                     <circle cx="28" cy="28" r="22" fill={state.pumping ? '#e0f2fe' : '#ffe4e6'} stroke={state.pumping ? '#38bdf8' : '#fda4af'} strokeWidth="2" />
@@ -2035,24 +2093,18 @@ const AgricultureDashboard = () => {
                     onClick={(event) => {
                       const rect = event.currentTarget.getBoundingClientRect();
                       const pct = clamp((rect.bottom - event.clientY) / rect.height, 0, 1);
+                      lastLocalUpdateRef.current = Date.now();
+                      markMainTankDirty();
                       setState((prev) => {
                         const tank = Number((pct * 100).toFixed(1));
-                        const pumping = tank >= 100 ? false : prev.pumping;
-                        return {
+                        return applyMainTankRules({
                           ...prev,
                           tank,
-                          pumping,
-                          flowRate: pumping
-                            ? Number(percentPerTickToLitersPerMinute(
-                                tank > MAIN_TANK_FLOW_REDUCE_PERCENT
-                                  ? MAIN_TANK_LOW_FILL_PERCENT_PER_TICK
-                                  : MAIN_TANK_HIGH_FILL_PERCENT_PER_TICK
-                              ).toFixed(1))
-                            : 0,
-                        };
+                          mainTankManualOverride: null,
+                        }, prev);
                       });
                     }}
-                    title="Set tank level"
+                    title="Main tank pump follows tank level"
                   >
                     <div className="main-tank-cap"></div>
                     <div className="main-tank-body"></div>

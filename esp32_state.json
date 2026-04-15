@@ -1,10 +1,11 @@
 {
   "deviceIp": "192.168.0.20",
   "connected": false,
-  "lastError": "/status: HTTP Error 404: Not Found; /data: HTTP Error 404: Not Found; /: HTTP Error 404: Not Found",
+  "lastError": "/status: <urlopen error timed out>; /data: <urlopen error timed out>; /: <urlopen error timed out>",
   "state": {
-    "tank": 52.0,
+    "tank": 2.0,
     "pumping": false,
+    "mainTankManualOverride": false,
     "flowRate": 0.0,
     "gh": {
       "temp": 0.0,
@@ -13,40 +14,41 @@
       "fireAlert": false
     },
     "f1": {
-      "moisture": 82.3,
+      "moisture": 0.0,
       "ph": 0.0,
-      "wl": 24.7,
+      "wl": 0.0,
       "n": 0.0,
       "p": 0.0,
       "k": 0.0,
       "irrigation": false,
       "drain": false,
-      "acid": false,
-      "base": true
+      "acid": true,
+      "base": false
     },
     "f2": {
-      "moisture": 77.0,
+      "moisture": 0.0,
       "ph": 0.0,
-      "wl": 23.1,
+      "wl": 0.0,
       "n": 0.0,
       "p": 0.0,
       "k": 0.0,
       "irrigation": false,
       "drain": false,
-      "acid": false,
-      "base": true
+      "acid": true,
+      "base": false
     },
     "f3": {
-      "moisture": 72.8,
+      "moisture": 0.0,
       "ph": 0.0,
-      "wl": 21.8,
+      "wl": 0.0,
       "n": 0.0,
       "p": 0.0,
       "k": 0.0,
       "irrigation": false,
       "drain": false,
-      "acid": false,
-      "base": true
-    }
+      "acid": true,
+      "base": false
+    },
+    "mainTankDataAt": 1776277808.5912073
   }
 }

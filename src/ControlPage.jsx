@@ -1,5 +1,11 @@
 import React from 'react';
 
+const PH_TARGET = 7;
+const getPhChemicalState = (ph) => ({
+  acid: ph < PH_TARGET,
+  base: ph > PH_TARGET,
+});
+
 const DEFAULT_VALUES = {
   tank: 41,
   pumping: true,
@@ -25,7 +31,7 @@ const DEFAULT_VALUES = {
   f2Irrigation: false,
   f2Drain: false,
   f2Acid: false,
-  f2Base: false,
+  f2Base: true,
   f3Moisture: 24,
   f3Ph: 3.2,
   f3Wl: 8.5,
@@ -34,8 +40,8 @@ const DEFAULT_VALUES = {
   f3K: 31,
   f3Irrigation: true,
   f3Drain: false,
-  f3Acid: false,
-  f3Base: true,
+  f3Acid: true,
+  f3Base: false,
 };
 
 const FIELD_CONFIGS = [
@@ -119,10 +125,22 @@ const ControlPage = ({ controlValues = {}, setControlValues = () => {} }) => {
 
   const handleSliderChange = (key, value) => {
     const numericValue = parseFloat(value);
-    setControlValues((prev) => ({
-      ...prev,
-      [key]: numericValue,
-    }));
+    setControlValues((prev) => {
+      const next = {
+        ...prev,
+        [key]: numericValue,
+      };
+
+      if (key === 'f1Ph') {
+        Object.assign(next, { f1Ph: numericValue, f1Acid: getPhChemicalState(numericValue).acid, f1Base: getPhChemicalState(numericValue).base });
+      } else if (key === 'f2Ph') {
+        Object.assign(next, { f2Ph: numericValue, f2Acid: getPhChemicalState(numericValue).acid, f2Base: getPhChemicalState(numericValue).base });
+      } else if (key === 'f3Ph') {
+        Object.assign(next, { f3Ph: numericValue, f3Acid: getPhChemicalState(numericValue).acid, f3Base: getPhChemicalState(numericValue).base });
+      }
+
+      return next;
+    });
   };
 
   const handleToggleChange = (key) => {
