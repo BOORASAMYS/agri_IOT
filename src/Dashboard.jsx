@@ -72,8 +72,9 @@ const percentPerTickToLitersPerMinute = (percentPerTick) => (
   (percentPerTick / 100) * MAIN_TANK_CAPACITY_ML * (60000 / AUTOMATION_TICK_MS) / 1000
 );
 const isMainTankPumpOn = (tank, wasPumping = false) => (
-  tank < MAIN_TANK_REFILL_START_PERCENT
-  || (wasPumping && tank < 100)
+  tank >= 100
+    ? false
+    : (wasPumping || tank < MAIN_TANK_REFILL_START_PERCENT)
 );
 const applyMainTankRules = (nextState, previousState = nextState) => {
   const tank = nextState.tank ?? previousState.tank ?? 0;
@@ -81,9 +82,13 @@ const applyMainTankRules = (nextState, previousState = nextState) => {
   const manualOverride = typeof nextState.mainTankManualOverride === 'boolean'
     ? nextState.mainTankManualOverride
     : previousState?.mainTankManualOverride;
-  const pumping = typeof manualOverride === 'boolean'
-    ? manualOverride
-    : isMainTankPumpOn(tank, previousPumping);
+  const pumping = tank < MAIN_TANK_REFILL_START_PERCENT
+    ? true
+    : tank >= 100
+      ? false
+      : typeof manualOverride === 'boolean'
+        ? manualOverride
+        : isMainTankPumpOn(tank, previousPumping);
   const refillPercentPerTick = pumping
     ? (tank >= MAIN_TANK_FLOW_REDUCE_PERCENT ? MAIN_TANK_LOW_FILL_PERCENT_PER_TICK : MAIN_TANK_HIGH_FILL_PERCENT_PER_TICK)
     : 0;
@@ -1489,7 +1494,7 @@ const AgricultureDashboard = () => {
           100% { transform: scaleX(1); }
         }
         
-        .spin-slow { animation: spin 2.5s linear infinite; }
+        .spin-slow { animation: spin 3.5s linear infinite; }
         .spin-med { animation: spin 1s linear infinite; }
         .spin-fast { animation: spin 0.35s linear infinite; }
         .spin-turbo { animation: spin 0.18s linear infinite; }

@@ -97,24 +97,36 @@ class ConnectionStatusTracker:
 
 def should_main_tank_pump(tank, was_pumping=False):
     normalized_tank = number_from_value(tank, 0.0)
-    return (
-        normalized_tank < MAIN_TANK_REFILL_START_PERCENT
-        or (bool_from_value(was_pumping) and normalized_tank < MAIN_TANK_STOP_PERCENT)
-    )
+    if normalized_tank >= MAIN_TANK_STOP_PERCENT:
+        return False
+    if bool_from_value(was_pumping):
+        return True
+    return normalized_tank <= MAIN_TANK_REFILL_START_PERCENT
 
 
 def format_worker_error(error):
     return f"{type(error).__name__}: {error}"
 
 
+class PLCCooldownActiveError(ConnectionError):
+    pass
+
+
 def get_main_tank_pumping_state():
     with STATE_LOCK:
-        manual_override = CURRENT["state"].get("mainTankManualOverride")
-        if isinstance(manual_override, bool):
-            pumping = manual_override
+        tank = number_from_value(CURRENT["state"]["tank"], 0.0)
+
+        if tank <= MAIN_TANK_REFILL_START_PERCENT:
+            pumping = True
+        elif tank >= MAIN_TANK_STOP_PERCENT:
+            pumping = False
         else:
-            tank = number_from_value(CURRENT["state"]["tank"], 0.0)
-            pumping = should_main_tank_pump(tank, CURRENT["state"].get("pumping"))
+            manual_override = CURRENT["state"].get("mainTankManualOverride")
+            if isinstance(manual_override, bool):
+                pumping = manual_override
+            else:
+                pumping = should_main_tank_pump(tank, CURRENT["state"].get("pumping"))
+
         CURRENT["state"]["pumping"] = pumping
         return pumping
 
@@ -126,6 +138,8 @@ class PLCCommandWorker:
         self._thread = threading.Thread(target=self._run, name="plc-worker", daemon=True)
         self._status = ConnectionStatusTracker("PLC WORKER")
         self._offline_until = 0.0
+        self._pending_commands = set()
+        self._pending_lock = threading.Lock()
 
     def start(self):
         self._thread.start()
@@ -136,6 +150,17 @@ class PLCCommandWorker:
         self._thread.join(timeout=3)
 
     def enqueue(self, command, source="control", wait=False, timeout=5.0):
+        if not wait:
+            with self._pending_lock:
+                if command in self._pending_commands:
+                    return {
+                        "queued": False,
+                        "skipped_duplicate": True,
+                        "command": command,
+                        "source": source,
+                    }
+                self._pending_commands.add(command)
+
         message = {
             "type": "relay",
             "command": command,
@@ -173,7 +198,7 @@ class PLCCommandWorker:
                 now = time.time()
                 if now < self._offline_until:
                     remaining = max(0.0, self._offline_until - now)
-                    raise ConnectionError(
+                    raise PLCCooldownActiveError(
                         f"Skipping PLC retry for {remaining:.1f}s after recent connection failure"
                     )
                 result = send_relay_command(message["command"])
@@ -185,13 +210,23 @@ class PLCCommandWorker:
                 )
             except Exception as error:
                 message["error"] = error
-                if isinstance(error, ConnectionError):
+                if isinstance(error, PLCCooldownActiveError):
+                    pass
+                elif isinstance(error, ConnectionError):
                     self._offline_until = time.time() + PLC_OFFLINE_COOLDOWN_SECONDS
-                self._status.report_failure(
-                    "plc",
-                    f"{message['command']} -> {PLC_HOST}:{PLC_PORT}: {format_worker_error(error)}",
-                )
+                    self._status.report_failure(
+                        "plc",
+                        f"{message['command']} -> {PLC_HOST}:{PLC_PORT}: {format_worker_error(error)}",
+                    )
+                else:
+                    self._status.report_failure(
+                        "plc",
+                        f"{message['command']} -> {PLC_HOST}:{PLC_PORT}: {format_worker_error(error)}",
+                    )
             finally:
+                if message["event"] is None:
+                    with self._pending_lock:
+                        self._pending_commands.discard(message["command"])
                 if message["event"] is not None:
                     message["event"].set()
                 self._queue.task_done()
@@ -1040,9 +1075,10 @@ def terminal_loop():
 
 
 def shutdown_backend(server):
-    print("\nManual shutdown detected. Resetting backend state to zero and switching irrigation off.")
+    print("\nManual shutdown detected. Resetting backend state to zero and switching irrigation and motor off.")
 
     control_worker.stop()
+    main_tank_sensor_worker.stop()
 
     reset_state_for_shutdown()
 
@@ -1053,9 +1089,9 @@ def shutdown_backend(server):
             print(f"[SHUTDOWN RELAY ERROR] {field_key.upper()}: {error}")
 
     try:
-        sync_main_tank_relay()
+        plc_worker.enqueue(RELAY_COMMANDS["main_tank"][False], source="shutdown", wait=True)
     except Exception as error:
-        print(f"[SHUTDOWN RELAY ERROR] MAIN TANK: {error}")
+        print(f"[SHUTDOWN RELAY ERROR] MAIN TANK MOTOR: {error}")
 
     for field_key, esp_num in UIBackendHandler.FIELD_TO_ESP.items():
         try:
@@ -1063,7 +1099,6 @@ def shutdown_backend(server):
         except Exception as error:
             print(f"[SHUTDOWN ESP SYNC ERROR] {field_key.upper()}: {error}")
 
-    main_tank_sensor_worker.stop()
     esp_worker.stop()
     plc_worker.stop()
     if close_modbus_controller is not None:

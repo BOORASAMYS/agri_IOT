@@ -1,5 +1,6 @@
 import logging
 import os
+import socket
 import threading
 import time
 
@@ -10,6 +11,12 @@ MODBUS_HOST = os.getenv("PLC_IP", "192.168.0.3")
 MODBUS_PORT = int(os.getenv("PLC_PORT", "502"))
 MODBUS_RECONNECT_DELAY = float(os.getenv("PLC_RECONNECT_DELAY", "5"))
 MODBUS_TIMEOUT_SECONDS = float(os.getenv("PLC_TIMEOUT", "2"))
+MODBUS_PERSIST_CONNECTION = os.getenv("PLC_PERSIST_CONNECTION", "0").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 # Pymodbus logs every failed socket connect at ERROR level, which floods the
 # console when the PLC is temporarily offline. The worker already reports
@@ -54,6 +61,9 @@ class PLCController:
             timeout=self.operation_timeout,
         )
 
+    def _should_persist_connection(self):
+        return MODBUS_PERSIST_CONNECTION
+
     def _close_unlocked(self):
         if self._client is None:
             return
@@ -77,13 +87,24 @@ class PLCController:
                 return True
 
             now = time.time()
-            if now - self._last_connect_attempt < self.reconnect_delay:
+            if not force_reconnect and now - self._last_connect_attempt < self.reconnect_delay:
                 return False
 
             self._last_connect_attempt = now
             self._close_unlocked()
             self._client = self._create_client()
             return bool(self._client.connect())
+
+    def _is_transient_error(self, error):
+        transient_types = (
+            ConnectionError,
+            ConnectionResetError,
+            BrokenPipeError,
+            TimeoutError,
+            OSError,
+            socket.error,
+        )
+        return isinstance(error, transient_types)
 
     def control(self, cmd):
         normalized_cmd = cmd.lower().strip()
@@ -92,26 +113,33 @@ class PLCController:
 
         addr, val = COMMAND_MAPPING[normalized_cmd]
         last_error = None
+        hold_connection = self._should_persist_connection()
 
         for attempt in range(2):
-            if not self.ensure_connected(force_reconnect=attempt > 0):
+            if not self.ensure_connected(force_reconnect=(attempt > 0) or (not hold_connection)):
                 last_error = ConnectionError(
                     f"Could not connect to Modbus server at {self.host}:{self.port}"
                 )
                 continue
 
-            with self._lock:
-                try:
-                    result = self._client.write_coil(addr, val)
-                except Exception as error:
-                    last_error = error
+            try:
+                with self._lock:
+                    try:
+                        result = self._client.write_coil(addr, val)
+                    except Exception as error:
+                        last_error = error
+                        self._close_unlocked()
+                        if not self._is_transient_error(error):
+                            break
+                        continue
+
+                if getattr(result, "isError", lambda: False)():
+                    last_error = RuntimeError(f"Failed to send command: {normalized_cmd}")
                     self._close_unlocked()
                     continue
-
-            if getattr(result, "isError", lambda: False)():
-                last_error = RuntimeError(f"Failed to send command: {normalized_cmd}")
-                self.close()
-                continue
+            finally:
+                if not hold_connection:
+                    self.close()
 
             print("Sent:", normalized_cmd)
             return {"command": normalized_cmd, "address": addr, "value": val}

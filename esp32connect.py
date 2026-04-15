@@ -165,19 +165,29 @@ def get_ph_chemical_state(ph):
 
 def should_main_tank_pump(tank, was_pumping=False):
     normalized_tank = number_from_value(tank, 0.0)
-    return (
-        normalized_tank < MAIN_TANK_REFILL_START_PERCENT
-        or (bool_from_value(was_pumping) and normalized_tank < MAIN_TANK_STOP_PERCENT)
-    )
+    if normalized_tank >= MAIN_TANK_STOP_PERCENT:
+        return False
+    if bool_from_value(was_pumping):
+        return True
+    return normalized_tank <= MAIN_TANK_REFILL_START_PERCENT
 
 
 def resolve_main_tank_pumping(state):
     state_values = state.get("state", {}) if isinstance(state, dict) else {}
+    tank = number_from_value(state_values.get("tank"), 0.0)
+
+    # The automatic tank limits always win: at or below 20% the pump must run,
+    # and at 100% it must stop. Manual override only applies between them.
+    if tank <= MAIN_TANK_REFILL_START_PERCENT:
+        return True
+    if tank >= MAIN_TANK_STOP_PERCENT:
+        return False
+
     manual_override = state_values.get("mainTankManualOverride")
     if isinstance(manual_override, bool):
         return manual_override
     return should_main_tank_pump(
-        state_values.get("tank"),
+        tank,
         state_values.get("pumping"),
     )
 
