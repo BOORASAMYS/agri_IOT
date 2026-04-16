@@ -462,6 +462,7 @@ class ControlLoopWorker:
         self.plc_worker = plc_worker
         self.esp_worker = esp_worker
         self._last_irrigation = {"f1": False, "f2": False, "f3": False}
+        self._last_greenhouse_fan = None
         self._stop_event = threading.Event()
         self._thread = threading.Thread(target=self._run, name="control-worker", daemon=True)
 
@@ -476,6 +477,7 @@ class ControlLoopWorker:
         while not self._stop_event.is_set():
             time.sleep(1)
             self._process_irrigation_changes()
+            self._process_greenhouse_changes()
 
     def _process_irrigation_changes(self):
         changes = []
@@ -516,6 +518,20 @@ class ControlLoopWorker:
             enqueue_main_tank_sync(source="control-loop")
             enqueue_esp_sync(UIBackendHandler.FIELD_TO_ESP[field_key], source="control-loop")
             print_formatted_field(field_key)
+
+    def _process_greenhouse_changes(self):
+        with STATE_LOCK:
+            current_fan = bool(CURRENT["state"]["gh"].get("fanOn"))
+
+        if self._last_greenhouse_fan is None:
+            self._last_greenhouse_fan = current_fan
+            return
+
+        if current_fan == self._last_greenhouse_fan:
+            return
+
+        self._last_greenhouse_fan = current_fan
+        enqueue_esp_sync(4, source="greenhouse-auto")
 
 
 class MainTankSensorWorker:

@@ -32,6 +32,10 @@ const getPhChemicalState = (ph) => ({
   acid: ph < PH_TARGET,
   base: ph > PH_TARGET,
 });
+const getGreenhouseFanState = (greenhouse = {}) => (
+  Number(greenhouse.temp ?? 0) > GREENHOUSE_FAN_TEMP_THRESHOLD
+  && Number(greenhouse.humidity ?? 0) > GREENHOUSE_FAN_HUMIDITY_THRESHOLD
+);
 const INITIAL_DASHBOARD_STATE = {
   tank: 100,
   tankSensor: {
@@ -524,9 +528,9 @@ const AgricultureDashboard = () => {
     return '#ef4444';
   };
 
-  const fanOn =
-    (state.gh.temp ?? 0) > GREENHOUSE_FAN_TEMP_THRESHOLD &&
-    (state.gh.humidity ?? 0) > GREENHOUSE_FAN_HUMIDITY_THRESHOLD;
+  const fanOn = typeof state.gh.fanOn === 'boolean'
+    ? state.gh.fanOn
+    : getGreenhouseFanState(state.gh);
   const fireOn = state.gh.fireAlert;
   const fireSensorStatus = fireOn ? 'Fire Detected' : 'Safe';
   const fanSpeedClass = fanOn ? "spin-med" : "spin-stop";
@@ -613,6 +617,7 @@ const AgricultureDashboard = () => {
   const buildGreenhousePayload = () => ({
     temp: state.gh.temp,
     humidity: state.gh.humidity,
+    fanOn: getGreenhouseFanState(state.gh),
   });
 
   const buildMainTankPayload = () => ({
@@ -624,10 +629,18 @@ const AgricultureDashboard = () => {
   const updateGreenhouse = (patch) => {
     lastLocalUpdateRef.current = Date.now();
     dirtyGreenhouseRef.current = true;
-    setState((prev) => ({
-      ...prev,
-      gh: { ...prev.gh, ...patch },
-    }));
+    setState((prev) => {
+      const nextGreenhouse = { ...prev.gh, ...patch };
+
+      if (!Object.prototype.hasOwnProperty.call(patch, 'fanOn')) {
+        nextGreenhouse.fanOn = getGreenhouseFanState(nextGreenhouse);
+      }
+
+      return {
+        ...prev,
+        gh: nextGreenhouse,
+      };
+    });
   };
 
   const sendGreenhouseToServer = async (payload) => {

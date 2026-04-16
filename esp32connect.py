@@ -579,6 +579,10 @@ def update_current(patch, connected=None, last_error=None, field_metadata=None):
         now = time.time()
         merged = apply_greenhouse_rules(deep_merge(CURRENT, patch))
         state_patch = patch.get("state", {}) if isinstance(patch.get("state"), dict) else {}
+        greenhouse_patch = state_patch.get("gh", {}) if isinstance(state_patch.get("gh"), dict) else {}
+
+        if "fanOn" in greenhouse_patch:
+            merged["state"]["gh"]["fanOn"] = bool_from_value(greenhouse_patch.get("fanOn"))
 
         for field_key in ("f1", "f2", "f3"):
             field = merged["state"][field_key]
