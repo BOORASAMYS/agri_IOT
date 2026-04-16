@@ -194,6 +194,13 @@ def is_ph_out_of_range(ph):
 
 def resolve_auto_irrigation(field_key, field, currently_irrigating=False):
     moisture = number_from_value(field.get("moisture"), IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD)
+    if field_key == "f3":
+        if moisture < IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD:
+            return True, "moisture"
+        if moisture > IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD:
+            return False, None
+        return bool_from_value(currently_irrigating), "moisture" if bool_from_value(currently_irrigating) else None
+
     ph = number_from_value(field.get("ph"), IRRIGATION_PH_TARGET)
     should_start = moisture < IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD and is_ph_out_of_range(ph)
     return should_start, "moisture+ph" if should_start else None

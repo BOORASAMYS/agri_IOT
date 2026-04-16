@@ -22,6 +22,7 @@ const MAIN_TANK_FILL_TIME_MINUTES = 2;
 const MAIN_TANK_DRAIN_STEP_PERCENT = 2;
 const MAIN_TANK_DRAIN_INTERVAL_MS = 1200;
 const AUTOMATION_TICK_MS = 1200;
+const STATUS_REFRESH_INTERVAL_MS = 500;
 const IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD = 30;
 const IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD = 60;
 const MAIN_TANK_HIGH_FILL_PERCENT_PER_TICK = 2.0;
@@ -109,6 +110,12 @@ const isFieldPhOutOfRange = (ph) => Number(ph ?? PH_TARGET) < IRRIGATION_LOW_PH_
 const canFieldStartIrrigation = (fieldKey, field) => shouldFieldIrrigate(fieldKey, field, false);
 const shouldFieldIrrigate = (fieldKey, field, wasIrrigating = false) => {
   const moisture = Number(field?.moisture ?? 0);
+  if (fieldKey === 'f3') {
+    if (moisture < IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD) return true;
+    if (moisture > IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD) return false;
+    return Boolean(wasIrrigating);
+  }
+
   const ph = Number(field?.ph ?? PH_TARGET);
   return moisture < IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD && isFieldPhOutOfRange(ph);
 };
@@ -473,7 +480,7 @@ const AgricultureDashboard = () => {
     };
 
     refreshFromServer();
-    const intervalId = window.setInterval(refreshFromServer, 2000);
+    const intervalId = window.setInterval(refreshFromServer, STATUS_REFRESH_INTERVAL_MS);
 
     return () => {
       isCancelled = true;
@@ -1721,6 +1728,7 @@ const AgricultureDashboard = () => {
         .main-tank-water-zone .water-fill {
           opacity: 0.98;
           background: linear-gradient(180deg, #8fd8ff 0%, #4fc3f7 42%, #1da1f2 100%);
+          transition-duration: 0.18s;
         }
         .main-tank-value {
           position: absolute;

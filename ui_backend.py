@@ -95,8 +95,8 @@ ESP_INTER_REQUEST_DELAY_SECONDS = 0.2
 PLC_COMMAND_QUEUE_TIMEOUT_SECONDS = 1.0
 ESP_COMMAND_QUEUE_TIMEOUT_SECONDS = 1.0
 MAIN_TANK_SENSOR_URL = os.getenv("MAIN_TANK_SENSOR_URL", "http://192.168.0.4/tank")
-MAIN_TANK_SENSOR_TIMEOUT_SECONDS = 2
-MAIN_TANK_POLL_INTERVAL_SECONDS = float(os.getenv("MAIN_TANK_POLL_INTERVAL_SECONDS", "1.0"))
+MAIN_TANK_SENSOR_TIMEOUT_SECONDS = float(os.getenv("MAIN_TANK_SENSOR_TIMEOUT", "0.8"))
+MAIN_TANK_POLL_INTERVAL_SECONDS = float(os.getenv("MAIN_TANK_POLL_INTERVAL_SECONDS", "0.5"))
 FARMHOUSE_FIRE_SENSOR_URL = os.getenv("FARMHOUSE_FIRE_SENSOR_URL", "http://192.168.0.7/fire")
 FARMHOUSE_FIRE_SENSOR_TIMEOUT_SECONDS = float(os.getenv("FARMHOUSE_FIRE_SENSOR_TIMEOUT", "2.0"))
 FARMHOUSE_FIRE_POLL_INTERVAL_SECONDS = float(os.getenv("FARMHOUSE_FIRE_POLL_INTERVAL", "1.0"))
@@ -491,7 +491,17 @@ class ControlLoopWorker:
                 field = deepcopy(CURRENT["state"][field_key])
             moisture = number_from_value(field.get("moisture"), 0.0)
             ph = number_from_value(field.get("ph"), 7.0)
-            if is_running:
+            if field_key == "f3" and is_running:
+                print(
+                    f"\n[AUTO-IRRIGATION] F3 started because moisture is below 30% "
+                    f"(current: moisture {moisture:.1f}%)."
+                )
+            elif field_key == "f3":
+                print(
+                    f"\n[AUTO-SHUTOFF] F3 stopped because moisture is above 60% "
+                    f"(current: moisture {moisture:.1f}%)."
+                )
+            elif is_running:
                 print(
                     f"\n[AUTO-IRRIGATION] {field_key.upper()} started because moisture is below 30% "
                     f"and pH is outside the 4-10 range (current: moisture {moisture:.1f}%, pH {ph:.2f})."
@@ -1116,6 +1126,10 @@ class UIBackendHandler(Handler):
     def do_GET(self):
         parsed = urlparse(self.path)
 
+        if parsed.path == "/api/status":
+            self.send_json(get_dashboard_snapshot())
+            return
+
         if parsed.path == "/api/fire":
             try:
                 sensor_payload = farmhouse_fire_sensor_worker.read_once()
@@ -1268,7 +1282,7 @@ class UIBackendHandler(Handler):
                     manual_override=manual_override,
                     manual_override_provided=manual_override_provided,
                     source="main-tank-api",
-                    wait=True,
+                    wait=False,
                 )
                 response_payload["mainTank"]["queued"] = True
             except Exception as error:
