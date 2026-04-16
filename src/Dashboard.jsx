@@ -537,7 +537,7 @@ const AgricultureDashboard = () => {
   };
 
   const fanOn =
-    (state.gh.temp ?? 0) > GREENHOUSE_FAN_TEMP_THRESHOLD ||
+    (state.gh.temp ?? 0) > GREENHOUSE_FAN_TEMP_THRESHOLD &&
     (state.gh.humidity ?? 0) > GREENHOUSE_FAN_HUMIDITY_THRESHOLD;
   const fireOn = state.gh.fireAlert;
   const fireSensorStatus = fireOn ? 'Fire Detected' : 'Safe';
@@ -2332,7 +2332,7 @@ const AgricultureDashboard = () => {
                   <div
                     className="gh-panel-icon"
                     style={{ background: fanOn ? 'linear-gradient(180deg, #f0fdf4 0%, #dcfce7 100%)' : 'linear-gradient(180deg, #ffffff 0%, #eef3f8 100%)', boxShadow: fanOn ? '0 6px 16px rgba(13, 148, 136, 0.16)' : 'inset 0 1px 0 rgba(255,255,255,0.9)', cursor: 'pointer' }}
-                    title="Fan turns on automatically when temperature is above 40 or humidity is above 70"
+                    title="Fan turns on automatically when temperature is above 40 and humidity is above 70"
                     >
                       <svg width="36" height="36" viewBox="0 0 36 36" className={fanOn ? fanSpeedClass : 'spin-stop'}>
                       <path d="M18 18C18 9.8 26.6 7.1 28.5 12.6C30 17.1 24.3 19.4 18 18Z" fill="#0d9488" opacity="0.9"/>

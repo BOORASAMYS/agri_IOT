@@ -7,7 +7,7 @@
     "tankSensor": {
       "value": 0.0,
       "online": true,
-      "lastUpdatedAt": 1776363415.3822894,
+      "lastUpdatedAt": 1776364343.790222,
       "error": ""
     },
     "pumping": false,
@@ -19,12 +19,12 @@
       "fireAlert": false,
       "fireSensor": {
         "online": true,
-        "lastUpdatedAt": 1776363415.424293,
+        "lastUpdatedAt": 1776364343.8072956,
         "raw": "No Fire",
         "error": ""
       },
-      "fanOn": true,
-      "fireDataAt": 1776363415.424293
+      "fanOn": false,
+      "fireDataAt": 1776364343.8072956
     },
     "f1": {
       "moisture": 0.0,
@@ -62,6 +62,6 @@
       "acid": false,
       "base": false
     },
-    "mainTankDataAt": 1776363415.3822894
+    "mainTankDataAt": 1776364343.790222
   }
 }

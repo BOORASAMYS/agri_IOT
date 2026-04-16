@@ -287,7 +287,7 @@ def apply_greenhouse_rules(state):
     humidity = number_from_value(greenhouse.get("humidity"), GREENHOUSE_FAN_HUMIDITY_THRESHOLD)
     greenhouse["fanOn"] = (
         temp > GREENHOUSE_FAN_TEMP_THRESHOLD
-        or humidity > GREENHOUSE_FAN_HUMIDITY_THRESHOLD
+        and humidity > GREENHOUSE_FAN_HUMIDITY_THRESHOLD
     )
     return state
 
