@@ -28,9 +28,6 @@ const IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD = 60;
 const MAIN_TANK_HIGH_FILL_PERCENT_PER_TICK = 2.0;
 const MAIN_TANK_LOW_FILL_PERCENT_PER_TICK = 2.0;
 const PH_TARGET = 7;
-const PH_TARGET_TOLERANCE = 0.05;
-const IRRIGATION_LOW_PH_THRESHOLD = 4;
-const IRRIGATION_HIGH_PH_THRESHOLD = 10;
 const getPhChemicalState = (ph) => ({
   acid: ph < PH_TARGET,
   base: ph > PH_TARGET,
@@ -105,19 +102,12 @@ const createInitialDashboardState = () => applyMainTankRules({
 const clampValue = (value, min, max) => Math.max(min, Math.min(max, value));
 const moistureToWaterLevel = (moisture) => Number(clampValue((moisture / 100) * 30, 0, 30).toFixed(1));
 const waterLevelToMoisture = (waterLevel) => Number(clampValue((waterLevel / 30) * 100, 0, 100).toFixed(1));
-const isFieldPhBalanced = (ph) => Math.abs(Number(ph ?? PH_TARGET) - PH_TARGET) <= PH_TARGET_TOLERANCE;
-const isFieldPhOutOfRange = (ph) => Number(ph ?? PH_TARGET) < IRRIGATION_LOW_PH_THRESHOLD || Number(ph ?? PH_TARGET) > IRRIGATION_HIGH_PH_THRESHOLD;
 const canFieldStartIrrigation = (fieldKey, field) => shouldFieldIrrigate(fieldKey, field, false);
 const shouldFieldIrrigate = (fieldKey, field, wasIrrigating = false) => {
   const moisture = Number(field?.moisture ?? 0);
-  if (fieldKey === 'f3') {
-    if (moisture < IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD) return true;
-    if (moisture > IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD) return false;
-    return Boolean(wasIrrigating);
-  }
-
-  const ph = Number(field?.ph ?? PH_TARGET);
-  return moisture < IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD && isFieldPhOutOfRange(ph);
+  if (moisture >= IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD) return false;
+  if (moisture < IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD) return true;
+  return Boolean(wasIrrigating);
 };
 const percentPerTickToLitersPerMinute = (percentPerTick) => (
   (percentPerTick / 100) * MAIN_TANK_CAPACITY_ML * (60000 / AUTOMATION_TICK_MS) / 1000
@@ -166,7 +156,6 @@ const AgricultureDashboard = () => {
   const [isAutomationEnabled, setIsAutomationEnabled] = useState(false);
   const [isShutdownRequested, setIsShutdownRequested] = useState(false);
 
-  const [isMounted, setIsMounted] = useState(false);
   const [isLoadingScreenVisible, setIsLoadingScreenVisible] = useState(true);
   const [dashboardHeight, setDashboardHeight] = useState(640);
   const [dashboardScale, setDashboardScale] = useState(1);
@@ -360,7 +349,6 @@ const AgricultureDashboard = () => {
 
   // --- INITIALIZE TIME ON CLIENT SIDE AFTER HYDRATION ---
   useEffect(() => {
-    setIsMounted(true);
     setState(prevState => ({ ...prevState, time: new Date().toLocaleTimeString() }));
   }, []);
 
@@ -377,7 +365,7 @@ const AgricultureDashboard = () => {
         const nextFields = {};
         let activeIrrigationCount = 0;
 
-        ['f1', 'f2', 'f3'].forEach((fieldKey, index) => {
+        ['f1', 'f2', 'f3'].forEach((fieldKey) => {
           const field = prev[fieldKey];
           const canIrrigate = prev.tank > 8;
           const computedIrrigation = canIrrigate && shouldFieldIrrigate(fieldKey, field, Boolean(field.irrigation));
@@ -559,10 +547,6 @@ const AgricultureDashboard = () => {
   ];
 
   const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
-  const bump = (value, step, min, max, digits = 1) => {
-    const next = value + step > max ? min : value + step;
-    return Number(next.toFixed(digits));
-  };
   const getClientPoint = (event) => {
     if (event.touches && event.touches[0]) {
       return { x: event.touches[0].clientX, y: event.touches[0].clientY };

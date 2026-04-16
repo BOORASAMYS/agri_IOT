@@ -154,13 +154,6 @@ const ControlPage = ({ controlValues = {}, setControlValues = () => {} }) => {
     setControlValues(DEFAULT_VALUES);
   };
 
-  const applyPreset = (preset) => {
-    setControlValues((prev) => ({
-      ...prev,
-      ...preset,
-    }));
-  };
-
   return (
     <div className="control-page">
       <style>{`
