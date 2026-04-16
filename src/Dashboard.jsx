@@ -27,23 +27,38 @@ const IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD = 60;
 const MAIN_TANK_HIGH_FILL_PERCENT_PER_TICK = 2.0;
 const MAIN_TANK_LOW_FILL_PERCENT_PER_TICK = 2.0;
 const PH_TARGET = 7;
+const PH_TARGET_TOLERANCE = 0.05;
+const IRRIGATION_LOW_PH_THRESHOLD = 4;
+const IRRIGATION_HIGH_PH_THRESHOLD = 10;
 const getPhChemicalState = (ph) => ({
   acid: ph < PH_TARGET,
   base: ph > PH_TARGET,
 });
 const INITIAL_DASHBOARD_STATE = {
   tank: 100,
+  tankSensor: {
+    value: 100,
+    online: false,
+    lastUpdatedAt: null,
+    error: '',
+  },
   pumping: true,
   mainTankManualOverride: null,
   flowRate: 2.4,
   gh: { temp: 35, humidity: 65, fireAlert: false, fanOn: false },
-  f1: { moisture: 62.4, ph: 6.81, wl: 21.3, n: 42, p: 35, k: 55, irrigation: true, drain: true, acid: true, base: false },
+  f1: { moisture: 62.4, ph: 6.81, wl: 21.3, n: 42, p: 35, k: 55, irrigation: false, drain: true, acid: true, base: false },
   f2: { moisture: 60.8, ph: 8.10, wl: 13.3, n: 38, p: 28, k: 48, irrigation: false, drain: false, acid: false, base: true },
-  f3: { moisture: 24, ph: 3.2, wl: 8.5, n: 22, p: 18, k: 31, irrigation: true, drain: false, acid: true, base: false },
+  f3: { moisture: 24, ph: 3.2, wl: 8.5, n: 22, p: 18, k: 31, irrigation: false, drain: false, acid: true, base: false },
 };
 
 const ZERO_DASHBOARD_STATE = {
   tank: 0,
+  tankSensor: {
+    value: 0,
+    online: false,
+    lastUpdatedAt: null,
+    error: '',
+  },
   pumping: false,
   mainTankManualOverride: null,
   flowRate: 0,
@@ -56,19 +71,35 @@ const ZERO_DASHBOARD_STATE = {
 const createInitialDashboardState = () => applyMainTankRules({
   ...INITIAL_DASHBOARD_STATE,
   gh: { ...INITIAL_DASHBOARD_STATE.gh },
-  f1: { ...INITIAL_DASHBOARD_STATE.f1, ...getPhChemicalState(INITIAL_DASHBOARD_STATE.f1.ph) },
-  f2: { ...INITIAL_DASHBOARD_STATE.f2, ...getPhChemicalState(INITIAL_DASHBOARD_STATE.f2.ph) },
-  f3: { ...INITIAL_DASHBOARD_STATE.f3, ...getPhChemicalState(INITIAL_DASHBOARD_STATE.f3.ph) },
+  f1: {
+    ...INITIAL_DASHBOARD_STATE.f1,
+    irrigation: false,
+    ...getPhChemicalState(INITIAL_DASHBOARD_STATE.f1.ph),
+  },
+  f2: {
+    ...INITIAL_DASHBOARD_STATE.f2,
+    irrigation: false,
+    ...getPhChemicalState(INITIAL_DASHBOARD_STATE.f2.ph),
+  },
+  f3: {
+    ...INITIAL_DASHBOARD_STATE.f3,
+    irrigation: false,
+    ...getPhChemicalState(INITIAL_DASHBOARD_STATE.f3.ph),
+  },
   time: '',
 });
 
 const clampValue = (value, min, max) => Math.max(min, Math.min(max, value));
 const moistureToWaterLevel = (moisture) => Number(clampValue((moisture / 100) * 30, 0, 30).toFixed(1));
 const waterLevelToMoisture = (waterLevel) => Number(clampValue((waterLevel / 30) * 100, 0, 100).toFixed(1));
-const shouldFieldIrrigateFromMoisture = (moisture, wasIrrigating) => (
-  moisture < IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD
-  || (wasIrrigating && moisture < IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD)
-);
+const isFieldPhBalanced = (ph) => Math.abs(Number(ph ?? PH_TARGET) - PH_TARGET) <= PH_TARGET_TOLERANCE;
+const isFieldPhOutOfRange = (ph) => Number(ph ?? PH_TARGET) < IRRIGATION_LOW_PH_THRESHOLD || Number(ph ?? PH_TARGET) > IRRIGATION_HIGH_PH_THRESHOLD;
+const canFieldStartIrrigation = (fieldKey, field) => shouldFieldIrrigate(fieldKey, field, false);
+const shouldFieldIrrigate = (fieldKey, field, wasIrrigating = false) => {
+  const moisture = Number(field?.moisture ?? 0);
+  const ph = Number(field?.ph ?? PH_TARGET);
+  return moisture < IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD && isFieldPhOutOfRange(ph);
+};
 const percentPerTickToLitersPerMinute = (percentPerTick) => (
   (percentPerTick / 100) * MAIN_TANK_CAPACITY_ML * (60000 / AUTOMATION_TICK_MS) / 1000
 );
@@ -183,9 +214,9 @@ const AgricultureDashboard = () => {
       tank: startingTank,
       pumping: false,
       flowRate: 0,
-      f1: { ...ZERO_DASHBOARD_STATE.f1, irrigation: true },
-      f2: { ...ZERO_DASHBOARD_STATE.f2, irrigation: true },
-      f3: { ...ZERO_DASHBOARD_STATE.f3, irrigation: true },
+      f1: { ...ZERO_DASHBOARD_STATE.f1, irrigation: false },
+      f2: { ...ZERO_DASHBOARD_STATE.f2, irrigation: false },
+      f3: { ...ZERO_DASHBOARD_STATE.f3, irrigation: false },
       time: '',
     });
 
@@ -207,7 +238,7 @@ const AgricultureDashboard = () => {
           const nextTank = Number(Math.max(0, prev.tank - dynamicDrainStep).toFixed(1));
           const drainedPercent = Number(Math.max(0, prev.tank - nextTank).toFixed(1));
 
-          const hydrateFieldFromTank = (field) => {
+          const hydrateFieldFromTank = (fieldKey, field) => {
             const nextMoisture = Number(clampValue((field.moisture ?? 0) + drainedPercent * 1.4, 0, 100).toFixed(1));
             const nextWaterLevel = moistureToWaterLevel(nextMoisture);
             const phFromMoisture = 1 + (nextMoisture / 10);
@@ -218,7 +249,11 @@ const AgricultureDashboard = () => {
               moisture: nextMoisture,
               wl: nextWaterLevel,
               ph: nextPh,
-              irrigation: true,
+              irrigation: shouldFieldIrrigate(
+                fieldKey,
+                { ...field, moisture: nextMoisture, ph: nextPh },
+                Boolean(field.irrigation)
+              ),
             };
           };
 
@@ -231,9 +266,9 @@ const AgricultureDashboard = () => {
             tank: nextTank,
             pumping: false,
             flowRate: 0,
-            f1: hydrateFieldFromTank(prev.f1),
-            f2: hydrateFieldFromTank(prev.f2),
-            f3: hydrateFieldFromTank(prev.f3),
+            f1: hydrateFieldFromTank('f1', prev.f1),
+            f2: hydrateFieldFromTank('f2', prev.f2),
+            f3: hydrateFieldFromTank('f3', prev.f3),
           };
         });
       }, dynamicDrainIntervalMs);
@@ -269,6 +304,10 @@ const AgricultureDashboard = () => {
       const mergedState = {
         ...prevState,
         tank: isResetDraining ? prevState.tank : (hasFreshMainTankData ? (incomingTank ?? prevState.tank) : prevState.tank),
+        tankSensor: {
+          ...prevState.tankSensor,
+          ...(payloadState.tankSensor || {}),
+        },
         pumping: isResetDraining ? false : (payloadState.pumping ?? prevState.pumping),
         mainTankManualOverride: isResetDraining ? false : (payloadState.mainTankManualOverride ?? prevState.mainTankManualOverride ?? null),
         flowRate: isResetDraining ? 0 : (payloadState.flowRate ?? prevState.flowRate),
@@ -309,11 +348,7 @@ const AgricultureDashboard = () => {
         ['f1', 'f2', 'f3'].forEach((fieldKey, index) => {
           const field = prev[fieldKey];
           const canIrrigate = prev.tank > 8;
-          const moistureIrrigation = canIrrigate && (
-            field.moisture < IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD
-            || (field.irrigation && field.moisture < IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD)
-          );
-          const computedIrrigation = moistureIrrigation;
+          const computedIrrigation = canIrrigate && shouldFieldIrrigate(fieldKey, field, Boolean(field.irrigation));
           const manualOverride = manualIrrigationOverrideRef.current[fieldKey];
           const irrigation = typeof manualOverride === 'boolean' ? manualOverride : computedIrrigation;
           const drain = field.wl > 24 || (field.drain && field.wl > 17);
@@ -486,6 +521,13 @@ const AgricultureDashboard = () => {
   const greenhouseTempColor =
     state.gh.temp <= 24 ? '#3b82f6' : state.gh.temp <= 35 ? '#f59e0b' : '#ef4444';
   const mainTankFillPct = Math.min(state.tank, 100);
+  const tankSensorValue = Number.isFinite(Number(state.tankSensor?.value))
+    ? Number(state.tankSensor.value)
+    : null;
+  const tankSensorOnline = Boolean(state.tankSensor?.online);
+  const tankSensorLastUpdatedLabel = state.tankSensor?.lastUpdatedAt
+    ? new Date(state.tankSensor.lastUpdatedAt * 1000).toLocaleTimeString()
+    : 'Waiting for data';
   const mainTankScaleTicks = [
     { value: 100, position: 100, emphasis: true },
     { value: 75, position: 75 },
@@ -650,12 +692,14 @@ const AgricultureDashboard = () => {
     try {
       const response = await fetch(SHUTDOWN_ENDPOINT, {
         method: 'POST',
+        keepalive: true,
         headers: {
           'Content-Type': 'application/json',
         },
       });
 
-      const payloadFromServer = await response.json();
+      const rawResponse = await response.text();
+      const payloadFromServer = rawResponse ? JSON.parse(rawResponse) : {};
 
       if (!response.ok) {
         throw new Error(payloadFromServer?.error || `HTTP ${response.status}`);
@@ -740,7 +784,7 @@ const AgricultureDashboard = () => {
   );
 
   const FieldCard = ({ data, title, fieldKey }) => {
-    const showPhControls = fieldKey !== 'f3';
+    const showPhControls = true;
     const showChemicalControls = true;
     const [isMoistureDragging, setIsMoistureDragging] = useState(false);
     const [dragTarget, setDragTarget] = useState(null);
@@ -783,30 +827,48 @@ const AgricultureDashboard = () => {
     const updateField = (patch) => {
       lastLocalUpdateRef.current = Date.now();
       dirtyFieldsRef.current[fieldKey] = true;
-      if (Object.prototype.hasOwnProperty.call(patch, 'irrigation')) {
-        manualIrrigationOverrideRef.current[fieldKey] = patch.irrigation;
-      }
-      if (
-        Object.prototype.hasOwnProperty.call(patch, 'moisture')
-        || Object.prototype.hasOwnProperty.call(patch, 'wl')
-        || Object.prototype.hasOwnProperty.call(patch, 'ph')
-      ) {
-        delete manualIrrigationOverrideRef.current[fieldKey];
-      }
       setState((prev) => ({
         ...prev,
         [fieldKey]: (() => {
           const nextField = { ...prev[fieldKey], ...patch };
+          let nextManualOverride = manualIrrigationOverrideRef.current[fieldKey];
+
+          if (Object.prototype.hasOwnProperty.call(patch, 'irrigation')) {
+            if (patch.irrigation) {
+              const canStart = canFieldStartIrrigation(fieldKey, nextField);
+              nextField.irrigation = canStart;
+              nextManualOverride = canStart ? true : undefined;
+            } else {
+              nextField.irrigation = false;
+              nextManualOverride = false;
+            }
+          }
+
+          if (
+            Object.prototype.hasOwnProperty.call(patch, 'moisture')
+            || Object.prototype.hasOwnProperty.call(patch, 'wl')
+            || Object.prototype.hasOwnProperty.call(patch, 'ph')
+          ) {
+            nextManualOverride = undefined;
+          }
+
           if (
             Object.prototype.hasOwnProperty.call(patch, 'moisture')
             || Object.prototype.hasOwnProperty.call(patch, 'wl')
           ) {
-            const moisture = Number(clampValue(nextField.moisture ?? 0, 0, 100).toFixed(1));
-            nextField.irrigation = shouldFieldIrrigateFromMoisture(moisture, Boolean(prev[fieldKey]?.irrigation));
+            nextField.irrigation = shouldFieldIrrigate(fieldKey, nextField, Boolean(prev[fieldKey]?.irrigation));
           }
           if (Object.prototype.hasOwnProperty.call(patch, 'ph')) {
             Object.assign(nextField, getPhChemicalState(nextField.ph ?? PH_TARGET));
+            nextField.irrigation = shouldFieldIrrigate(fieldKey, nextField, Boolean(prev[fieldKey]?.irrigation));
           }
+
+          if (nextManualOverride === undefined) {
+            delete manualIrrigationOverrideRef.current[fieldKey];
+          } else {
+            manualIrrigationOverrideRef.current[fieldKey] = nextManualOverride;
+          }
+
           return nextField;
         })(),
       }));
@@ -2127,7 +2189,7 @@ const AgricultureDashboard = () => {
             >
               <span className="shutdown-power-icon" aria-hidden="true"></span>
               <span className="shutdown-label">
-                {isShutdownRequested ? 'Shutting Down...' : 'Shutdown Pi'}
+               
               </span>
             </button>
           </div>
@@ -2218,6 +2280,29 @@ const AgricultureDashboard = () => {
               <div className="stat-row"><span style={{ fontSize: '20px', fontWeight: 700, color: '#64748b' }}>Flow rate</span><span style={{ fontSize: '22px', fontWeight: 500, color: '#0369a1' }}>{state.flowRate.toFixed(1)} L/min</span></div>
               <div className="stat-row"><span style={{ fontSize: '20px', fontWeight: 700, color: '#64748b' }}>Fill time</span><span style={{ fontSize: '22px', fontWeight: 500, color: '#0369a1' }}>{MAIN_TANK_FILL_TIME_MINUTES} min</span></div>
               <div className="stat-row" style={{ border: 'none' }}><span style={{ fontSize: '20px', fontWeight: 700, color: '#64748b' }}>Pump status</span><span className="badge" style={{ fontSize: '22px', background: state.pumping ? '#dbeafe' : '#f1f5f9', color: state.pumping ? '#1e40af' : '#475569' }}>{state.pumping ? 'Active' : 'Idle'}</span></div>
+            </div>
+            <div style={{ marginTop: '12px', padding: '12px 14px', borderRadius: '14px', border: `1px solid ${tankSensorOnline ? '#bfdbfe' : '#fecaca'}`, background: tankSensorOnline ? 'linear-gradient(180deg, #f8fbff 0%, #eff6ff 100%)' : 'linear-gradient(180deg, #fff7f7 0%, #fff1f2 100%)', display: 'grid', gap: '6px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
+                <span style={{ fontSize: '18px', fontWeight: 700, color: '#334155' }}>ESP Tank Sensor</span>
+                <span className="badge" style={{ fontSize: '18px', background: tankSensorOnline ? '#dbeafe' : '#fee2e2', color: tankSensorOnline ? '#1d4ed8' : '#b91c1c' }}>
+                  {tankSensorOnline ? 'Online' : 'Offline'}
+                </span>
+              </div>
+              <div className="stat-row">
+                <span style={{ fontSize: '18px', fontWeight: 700, color: '#64748b' }}>Live reading</span>
+                <span style={{ fontSize: '24px', fontWeight: 700, color: tankSensorOnline ? '#0369a1' : '#b91c1c' }}>
+                  {tankSensorValue === null ? '--' : `${Math.round(tankSensorValue)}%`}
+                </span>
+              </div>
+              <div className="stat-row">
+                <span style={{ fontSize: '18px', fontWeight: 700, color: '#64748b' }}>Updated</span>
+                <span style={{ fontSize: '18px', fontWeight: 500, color: '#475569' }}>{tankSensorLastUpdatedLabel}</span>
+              </div>
+              {!tankSensorOnline && state.tankSensor?.error ? (
+                <div style={{ fontSize: '15px', lineHeight: 1.4, color: '#991b1b' }}>
+                  {state.tankSensor.error}
+                </div>
+              ) : null}
             </div>
           </div>
 

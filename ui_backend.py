@@ -4,6 +4,7 @@ import json
 import os
 import queue
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -30,6 +31,34 @@ from esp32connect import (
     simulation_loop,
     water_level_to_moisture,
 )
+
+
+def get_shutdown_command():
+    is_root = hasattr(os, "geteuid") and os.geteuid() == 0
+
+    if is_root:
+        return ["shutdown", "-h", "now"], None
+
+    sudo_path = shutil.which("sudo")
+    if sudo_path:
+        try:
+            sudo_check = subprocess.run(
+                [sudo_path, "-n", "true"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+        except Exception as error:
+            return None, f"Unable to verify sudo permission: {error}"
+
+        if sudo_check.returncode == 0:
+            return [sudo_path, "-n", "shutdown", "-h", "now"], None
+
+    return None, (
+        "Shutdown permission is not available for the backend user. "
+        "Run the backend with sudo, or allow passwordless shutdown for this user."
+    )
 
 try:
     from Agri_iot import close as close_modbus_controller
@@ -65,9 +94,9 @@ ESP_RETRY_BACKOFF_SECONDS = 0.75
 ESP_INTER_REQUEST_DELAY_SECONDS = 0.2
 PLC_COMMAND_QUEUE_TIMEOUT_SECONDS = 1.0
 ESP_COMMAND_QUEUE_TIMEOUT_SECONDS = 1.0
-MAIN_TANK_SENSOR_URL = "http://192.168.0.10/tank"
+MAIN_TANK_SENSOR_URL = os.getenv("MAIN_TANK_SENSOR_URL", "http://192.168.0.4/tank")
 MAIN_TANK_SENSOR_TIMEOUT_SECONDS = 2
-MAIN_TANK_POLL_INTERVAL_SECONDS = 4.0
+MAIN_TANK_POLL_INTERVAL_SECONDS = float(os.getenv("MAIN_TANK_POLL_INTERVAL_SECONDS", "1.0"))
 MAIN_TANK_STOP_PERCENT = 100.0
 MAIN_TANK_REFILL_START_PERCENT = 20.0
 MAIN_TANK_SIMULATION_STEP_PERCENT = 2.0
@@ -75,6 +104,7 @@ PLC_OFFLINE_COOLDOWN_SECONDS = float(os.getenv("PLC_OFFLINE_COOLDOWN", "20"))
 MAIN_TANK_SENSOR_ERROR_BACKOFF_SECONDS = float(os.getenv("MAIN_TANK_SENSOR_ERROR_BACKOFF", "20"))
 MAIN_TANK_RELAY_COMMAND_LOCK = threading.Lock()
 MAIN_TANK_LAST_REQUESTED_STATE = None
+MAIN_TANK_SENSOR_PRINT_DELTA = float(os.getenv("MAIN_TANK_SENSOR_PRINT_DELTA", "5"))
 
 
 class ConnectionStatusTracker:
@@ -440,10 +470,20 @@ class ControlLoopWorker:
                 self._last_irrigation[field_key] = current_value
 
         for field_key, is_running in changes:
+            with STATE_LOCK:
+                field = deepcopy(CURRENT["state"][field_key])
+            moisture = number_from_value(field.get("moisture"), 0.0)
+            ph = number_from_value(field.get("ph"), 7.0)
             if is_running:
-                print(f"\n[AUTO-IRRIGATION] {field_key.upper()} started because an automatic threshold was crossed.")
+                print(
+                    f"\n[AUTO-IRRIGATION] {field_key.upper()} started because moisture is below 30% "
+                    f"and pH is outside the 4-10 range (current: moisture {moisture:.1f}%, pH {ph:.2f})."
+                )
             else:
-                print(f"\n[AUTO-SHUTOFF] {field_key.upper()} stopped after reaching 60% moisture.")
+                print(
+                    f"\n[AUTO-SHUTOFF] {field_key.upper()} stopped because moisture/pH start condition is not satisfied "
+                    f"(current: moisture {moisture:.1f}%, pH {ph:.2f})."
+                )
 
             enqueue_field_relay_sync(field_key, source="control-loop")
             enqueue_main_tank_sync(source="control-loop")
@@ -458,6 +498,7 @@ class MainTankSensorWorker:
         self._session = requests.Session()
         self._status = ConnectionStatusTracker("MAIN TANK SENSOR")
         self._error_backoff_until = 0.0
+        self._last_printed_value = None
 
     def start(self):
         self._thread.start()
@@ -476,9 +517,29 @@ class MainTankSensorWorker:
 
             try:
                 tank_level = self._fetch_tank_level()
-                update_current({"state": {"tank": tank_level, "mainTankDataAt": time.time()}})
+                measured_at = time.time()
+                update_current(
+                    {
+                        "state": {
+                            "tank": tank_level,
+                            "tankSensor": {
+                                "value": tank_level,
+                                "online": True,
+                                "lastUpdatedAt": measured_at,
+                                "error": "",
+                            },
+                            "mainTankDataAt": measured_at,
+                        }
+                    }
+                )
                 self._error_backoff_until = 0.0
                 self._status.report_success("sensor", MAIN_TANK_SENSOR_URL)
+                if (
+                    self._last_printed_value is None
+                    or abs(tank_level - self._last_printed_value) >= MAIN_TANK_SENSOR_PRINT_DELTA
+                ):
+                    print(f"Tank Level: {tank_level:.1f}")
+                    self._last_printed_value = tank_level
                 try:
                     enqueue_main_tank_sync(source="main-tank-sensor")
                 except Exception as error:
@@ -488,9 +549,28 @@ class MainTankSensorWorker:
                 self._error_backoff_until = time.time() + MAIN_TANK_SENSOR_ERROR_BACKOFF_SECONDS
                 with STATE_LOCK:
                     current_tank = number_from_value(CURRENT["state"].get("tank"), 0.0)
+                update_current(
+                    {
+                        "state": {
+                            "tankSensor": {
+                                "value": current_tank,
+                                "online": False,
+                                "lastUpdatedAt": None,
+                                "error": format_worker_error(error),
+                            }
+                        }
+                    }
+                )
                 if current_tank < MAIN_TANK_STOP_PERCENT:
                     fallback_tank = round(min(MAIN_TANK_STOP_PERCENT, current_tank + MAIN_TANK_SIMULATION_STEP_PERCENT), 1)
-                    update_current({"state": {"tank": fallback_tank, "mainTankDataAt": time.time()}})
+                    update_current(
+                        {
+                            "state": {
+                                "tank": fallback_tank,
+                                "mainTankDataAt": time.time(),
+                            }
+                        }
+                    )
                     try:
                         enqueue_main_tank_sync(source="main-tank-fallback")
                     except Exception as relay_error:
@@ -901,8 +981,13 @@ class UIBackendHandler(Handler):
                 self.send_json({"error": "System shutdown is only supported when the backend is running on Raspberry Pi/Linux."}, status=501)
                 return
 
+            shutdown_command, shutdown_error = get_shutdown_command()
+            if shutdown_command is None:
+                self.send_json({"error": shutdown_error}, status=503)
+                return
+
             self.send_json({"ok": True, "message": "Raspberry Pi shutdown started."})
-            threading.Thread(target=perform_system_shutdown, args=(self.server,), daemon=True).start()
+            threading.Thread(target=perform_system_shutdown, args=(self.server, shutdown_command), daemon=True).start()
             return
 
         if parsed.path == "/api/greenhouse":
@@ -1142,14 +1227,38 @@ def shutdown_backend(server):
     server.server_close()
 
 
-def perform_system_shutdown(server):
-    time.sleep(0.5)
-    server.shutdown()
-    shutdown_backend(server)
+def perform_system_shutdown(server, shutdown_command):
+    backend_pid = os.getpid()
+
     try:
-        subprocess.Popen(["sudo", "shutdown", "-h", "now"])
+        shell_command = (
+            "sleep 1; "
+            "sudo -n /usr/sbin/shutdown -h now >/tmp/agri-shutdown.log 2>&1; "
+            f"kill -TERM {backend_pid} >/dev/null 2>&1 || true"
+        )
+        subprocess.Popen(
+            ["/bin/sh", "-c", shell_command],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
     except Exception as error:
         print(f"[SYSTEM SHUTDOWN ERROR] {error}")
+        return
+
+    time.sleep(0.3)
+
+    try:
+        server.shutdown()
+    except Exception as error:
+        print(f"[SERVER SHUTDOWN ERROR] {error}")
+
+    try:
+        shutdown_backend(server)
+    except Exception as error:
+        print(f"[BACKEND SHUTDOWN ERROR] {error}")
+
+    os._exit(0)
 
 
 if __name__ == "__main__":

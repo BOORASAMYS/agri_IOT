@@ -17,6 +17,9 @@ DEFAULT_DEVICE_IP = "192.168.0.20"
 IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD = 30.0
 IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD = 60.0
 IRRIGATION_PH_TARGET = 7.0
+IRRIGATION_PH_TOLERANCE = 0.05
+IRRIGATION_LOW_PH_THRESHOLD = 4.0
+IRRIGATION_HIGH_PH_THRESHOLD = 10.0
 IRRIGATION_PH_STEP_PER_TICK = 0.1
 MAIN_TANK_STOP_PERCENT = 100.0
 MAIN_TANK_REFILL_START_PERCENT = 20.0
@@ -33,6 +36,12 @@ DEFAULT_STATE = {
     "lastError": "ESP32 IP not configured",
     "state": {
         "tank": 41,
+        "tankSensor": {
+            "value": 41,
+            "online": False,
+            "lastUpdatedAt": None,
+            "error": "Main tank sensor not initialized",
+        },
         "pumping": False,
         "mainTankManualOverride": None,
         "flowRate": 0.0,
@@ -163,6 +172,23 @@ def get_ph_chemical_state(ph):
     }
 
 
+def is_ph_balanced(ph):
+    normalized_ph = number_from_value(ph, IRRIGATION_PH_TARGET)
+    return abs(normalized_ph - IRRIGATION_PH_TARGET) <= IRRIGATION_PH_TOLERANCE
+
+
+def is_ph_out_of_range(ph):
+    normalized_ph = number_from_value(ph, IRRIGATION_PH_TARGET)
+    return normalized_ph < IRRIGATION_LOW_PH_THRESHOLD or normalized_ph > IRRIGATION_HIGH_PH_THRESHOLD
+
+
+def resolve_auto_irrigation(field_key, field, currently_irrigating=False):
+    moisture = number_from_value(field.get("moisture"), IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD)
+    ph = number_from_value(field.get("ph"), IRRIGATION_PH_TARGET)
+    should_start = moisture < IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD and is_ph_out_of_range(ph)
+    return should_start, "moisture+ph" if should_start else None
+
+
 def should_main_tank_pump(tank, was_pumping=False):
     normalized_tank = number_from_value(tank, 0.0)
     if normalized_tank >= MAIN_TANK_STOP_PERCENT:
@@ -193,19 +219,18 @@ def resolve_main_tank_pumping(state):
 
 
 def should_auto_irrigate(field_key, field):
-    moisture = number_from_value(field.get("moisture"), IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD)
-    return moisture < IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD
+    should_irrigate, _ = resolve_auto_irrigation(field_key, field, currently_irrigating=bool_from_value(field.get("irrigation")))
+    return should_irrigate
+
+
+def can_start_irrigation(field_key, field):
+    should_irrigate, _ = resolve_auto_irrigation(field_key, field, currently_irrigating=False)
+    return should_irrigate
 
 
 def get_irrigation_reason(field_key, field):
-    moisture = number_from_value(field.get("moisture"), IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD)
-    existing_reason = IRRIGATION_RUNS[field_key]["reason"]
-    if moisture < IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD:
-        return "moisture"
-    if existing_reason == "moisture" and moisture < IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD:
-        return "moisture"
-
-    return None
+    _, reason = resolve_auto_irrigation(field_key, field, currently_irrigating=bool_from_value(field.get("irrigation")))
+    return reason
 
 
 def set_irrigation_run(field_key, reason, field, now=None):
@@ -217,7 +242,7 @@ def set_irrigation_run(field_key, reason, field, now=None):
 
     if reason == "moisture":
         start_moisture = min(
-            number_from_value(field.get("moisture"), IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD),
+            number_from_value(field.get("moisture"), IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD),
             IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD,
         )
         run["start_time"] = now
@@ -260,8 +285,12 @@ def initialize_irrigation_runtime(state):
         PH_CONTROL_LATCHES[field_key] = False
         MANUAL_IRRIGATION_OVERRIDES[field_key] = None
         field.update(get_ph_chemical_state(field.get("ph")))
+        field["irrigation"] = can_start_irrigation(field_key, field)
 
-        clear_irrigation_run(field_key)
+        if field["irrigation"]:
+            set_irrigation_run(field_key, "moisture", field)
+        else:
+            clear_irrigation_run(field_key)
 
     state["state"]["pumping"] = resolve_main_tank_pumping(state)
     return state
@@ -543,7 +572,13 @@ def update_current(patch, connected=None, last_error=None, field_metadata=None):
                 MANUAL_IRRIGATION_OVERRIDES[field_key] = None
 
             if metadata.get("manual_irrigation_control") and "irrigation" in field_patch:
-                MANUAL_IRRIGATION_OVERRIDES[field_key] = bool_from_value(field_patch.get("irrigation"))
+                requested_manual_irrigation = bool_from_value(field_patch.get("irrigation"))
+                if requested_manual_irrigation:
+                    MANUAL_IRRIGATION_OVERRIDES[field_key] = True if can_start_irrigation(field_key, field) else None
+                    if MANUAL_IRRIGATION_OVERRIDES[field_key] is None:
+                        field["irrigation"] = False
+                else:
+                    MANUAL_IRRIGATION_OVERRIDES[field_key] = False
 
             desired_auto_reason = get_irrigation_reason(field_key, field)
             manual_override = MANUAL_IRRIGATION_OVERRIDES[field_key]
@@ -557,7 +592,7 @@ def update_current(patch, connected=None, last_error=None, field_metadata=None):
                 field["irrigation"] = bool(desired_auto_reason) or manual_requested
 
             LOW_MOISTURE_LATCHES[field_key] = desired_auto_reason == "moisture"
-            PH_CONTROL_LATCHES[field_key] = False
+            PH_CONTROL_LATCHES[field_key] = desired_auto_reason == "ph"
             field.update(get_ph_chemical_state(field.get("ph")))
 
             if field["irrigation"]:
@@ -629,7 +664,7 @@ def simulation_loop():
                     dirty = True
 
                 LOW_MOISTURE_LATCHES[field_key] = desired_auto_reason == "moisture"
-                PH_CONTROL_LATCHES[field_key] = False
+                PH_CONTROL_LATCHES[field_key] = desired_auto_reason == "ph"
                 field.update(get_ph_chemical_state(field.get("ph")))
 
                 if should_irrigate:
