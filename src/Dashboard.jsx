@@ -521,13 +521,6 @@ const AgricultureDashboard = () => {
   const greenhouseTempColor =
     state.gh.temp <= 24 ? '#3b82f6' : state.gh.temp <= 35 ? '#f59e0b' : '#ef4444';
   const mainTankFillPct = Math.min(state.tank, 100);
-  const tankSensorValue = Number.isFinite(Number(state.tankSensor?.value))
-    ? Number(state.tankSensor.value)
-    : null;
-  const tankSensorOnline = Boolean(state.tankSensor?.online);
-  const tankSensorLastUpdatedLabel = state.tankSensor?.lastUpdatedAt
-    ? new Date(state.tankSensor.lastUpdatedAt * 1000).toLocaleTimeString()
-    : 'Waiting for data';
   const mainTankScaleTicks = [
     { value: 100, position: 100, emphasis: true },
     { value: 75, position: 75 },
@@ -2280,29 +2273,6 @@ const AgricultureDashboard = () => {
               <div className="stat-row"><span style={{ fontSize: '20px', fontWeight: 700, color: '#64748b' }}>Flow rate</span><span style={{ fontSize: '22px', fontWeight: 500, color: '#0369a1' }}>{state.flowRate.toFixed(1)} L/min</span></div>
               <div className="stat-row"><span style={{ fontSize: '20px', fontWeight: 700, color: '#64748b' }}>Fill time</span><span style={{ fontSize: '22px', fontWeight: 500, color: '#0369a1' }}>{MAIN_TANK_FILL_TIME_MINUTES} min</span></div>
               <div className="stat-row" style={{ border: 'none' }}><span style={{ fontSize: '20px', fontWeight: 700, color: '#64748b' }}>Pump status</span><span className="badge" style={{ fontSize: '22px', background: state.pumping ? '#dbeafe' : '#f1f5f9', color: state.pumping ? '#1e40af' : '#475569' }}>{state.pumping ? 'Active' : 'Idle'}</span></div>
-            </div>
-            <div style={{ marginTop: '12px', padding: '12px 14px', borderRadius: '14px', border: `1px solid ${tankSensorOnline ? '#bfdbfe' : '#fecaca'}`, background: tankSensorOnline ? 'linear-gradient(180deg, #f8fbff 0%, #eff6ff 100%)' : 'linear-gradient(180deg, #fff7f7 0%, #fff1f2 100%)', display: 'grid', gap: '6px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
-                <span style={{ fontSize: '18px', fontWeight: 700, color: '#334155' }}>ESP Tank Sensor</span>
-                <span className="badge" style={{ fontSize: '18px', background: tankSensorOnline ? '#dbeafe' : '#fee2e2', color: tankSensorOnline ? '#1d4ed8' : '#b91c1c' }}>
-                  {tankSensorOnline ? 'Online' : 'Offline'}
-                </span>
-              </div>
-              <div className="stat-row">
-                <span style={{ fontSize: '18px', fontWeight: 700, color: '#64748b' }}>Live reading</span>
-                <span style={{ fontSize: '24px', fontWeight: 700, color: tankSensorOnline ? '#0369a1' : '#b91c1c' }}>
-                  {tankSensorValue === null ? '--' : `${Math.round(tankSensorValue)}%`}
-                </span>
-              </div>
-              <div className="stat-row">
-                <span style={{ fontSize: '18px', fontWeight: 700, color: '#64748b' }}>Updated</span>
-                <span style={{ fontSize: '18px', fontWeight: 500, color: '#475569' }}>{tankSensorLastUpdatedLabel}</span>
-              </div>
-              {!tankSensorOnline && state.tankSensor?.error ? (
-                <div style={{ fontSize: '15px', lineHeight: 1.4, color: '#991b1b' }}>
-                  {state.tankSensor.error}
-                </div>
-              ) : null}
             </div>
           </div>
 

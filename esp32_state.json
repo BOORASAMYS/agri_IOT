@@ -1,14 +1,14 @@
 {
   "deviceIp": "192.168.0.20",
   "connected": false,
-  "lastError": "/status: <urlopen error [Errno 113] No route to host>; /data: <urlopen error timed out>; /: <urlopen error [Errno 113] No route to host>",
+  "lastError": "/status: <urlopen error [Errno 113] No route to host>; /data: <urlopen error [Errno 113] No route to host>; /: <urlopen error [Errno 113] No route to host>",
   "state": {
     "tank": 100.0,
     "tankSensor": {
       "value": 100.0,
       "online": false,
       "lastUpdatedAt": null,
-      "error": "ConnectionError: HTTPConnectionPool(host='192.168.0.4', port=80): Max retries exceeded with url: /tank (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x7f9146f820>: Failed to establish a new connection: [Errno 113] No route to host'))"
+      "error": "ConnectionError: HTTPConnectionPool(host='192.168.0.4', port=80): Max retries exceeded with url: /tank (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x7f914dcc00>: Failed to establish a new connection: [Errno 113] No route to host'))"
     },
     "pumping": false,
     "mainTankManualOverride": false,
@@ -20,9 +20,9 @@
       "fireAlert": false
     },
     "f1": {
-      "moisture": 17.5,
+      "moisture": 0.0,
       "ph": 6.75,
-      "wl": 5.2,
+      "wl": 0.0,
       "n": 42.0,
       "p": 35.0,
       "k": 55.0,
@@ -32,9 +32,9 @@
       "base": false
     },
     "f2": {
-      "moisture": 51.4,
+      "moisture": 30.2,
       "ph": 6.97,
-      "wl": 15.4,
+      "wl": 9.1,
       "n": 0.0,
       "p": 0.0,
       "k": 0.0,
@@ -44,9 +44,9 @@
       "base": false
     },
     "f3": {
-      "moisture": 55.3,
+      "moisture": 34.1,
       "ph": 6.08,
-      "wl": 16.6,
+      "wl": 10.2,
       "n": 0.0,
       "p": 0.0,
       "k": 0.0,
