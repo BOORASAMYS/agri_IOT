@@ -45,7 +45,17 @@ DEFAULT_STATE = {
         "pumping": False,
         "mainTankManualOverride": None,
         "flowRate": 0.0,
-        "gh": {"temp": 35, "humidity": 65},
+        "gh": {
+            "temp": 35,
+            "humidity": 65,
+            "fireAlert": False,
+            "fireSensor": {
+                "online": False,
+                "lastUpdatedAt": None,
+                "raw": "",
+                "error": "Farmhouse fire sensor not initialized",
+            },
+        },
         "f1": {
             "moisture": 62.4,
             "ph": 6.81,
@@ -415,11 +425,17 @@ def apply_status_payload(payload):
             gh_patch["temp"] = number_from_value(payload["gh"]["temp"], CURRENT["state"]["gh"]["temp"])
         if "humidity" in payload["gh"]:
             gh_patch["humidity"] = number_from_value(payload["gh"]["humidity"], CURRENT["state"]["gh"]["humidity"])
+        if "fireAlert" in payload["gh"]:
+            gh_patch["fireAlert"] = bool_from_value(payload["gh"]["fireAlert"])
 
     if "temperature" in payload:
         gh_patch["temp"] = number_from_value(payload["temperature"], CURRENT["state"]["gh"]["temp"])
     if "humidity" in payload:
         gh_patch["humidity"] = number_from_value(payload["humidity"], CURRENT["state"]["gh"]["humidity"])
+    if "fire" in payload:
+        gh_patch["fireAlert"] = bool_from_value(payload["fire"])
+    elif "fireAlert" in payload:
+        gh_patch["fireAlert"] = bool_from_value(payload["fireAlert"])
 
     if gh_patch:
         state_patch["gh"] = gh_patch

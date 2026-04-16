@@ -97,6 +97,10 @@ ESP_COMMAND_QUEUE_TIMEOUT_SECONDS = 1.0
 MAIN_TANK_SENSOR_URL = os.getenv("MAIN_TANK_SENSOR_URL", "http://192.168.0.4/tank")
 MAIN_TANK_SENSOR_TIMEOUT_SECONDS = 2
 MAIN_TANK_POLL_INTERVAL_SECONDS = float(os.getenv("MAIN_TANK_POLL_INTERVAL_SECONDS", "1.0"))
+FARMHOUSE_FIRE_SENSOR_URL = os.getenv("FARMHOUSE_FIRE_SENSOR_URL", "http://192.168.0.7/fire")
+FARMHOUSE_FIRE_SENSOR_TIMEOUT_SECONDS = float(os.getenv("FARMHOUSE_FIRE_SENSOR_TIMEOUT", "2.0"))
+FARMHOUSE_FIRE_POLL_INTERVAL_SECONDS = float(os.getenv("FARMHOUSE_FIRE_POLL_INTERVAL", "1.0"))
+FARMHOUSE_FIRE_SENSOR_ERROR_BACKOFF_SECONDS = float(os.getenv("FARMHOUSE_FIRE_SENSOR_ERROR_BACKOFF", "20"))
 MAIN_TANK_STOP_PERCENT = 100.0
 MAIN_TANK_REFILL_START_PERCENT = 20.0
 MAIN_TANK_SIMULATION_STEP_PERCENT = 2.0
@@ -105,6 +109,19 @@ MAIN_TANK_SENSOR_ERROR_BACKOFF_SECONDS = float(os.getenv("MAIN_TANK_SENSOR_ERROR
 MAIN_TANK_RELAY_COMMAND_LOCK = threading.Lock()
 MAIN_TANK_LAST_REQUESTED_STATE = None
 MAIN_TANK_SENSOR_PRINT_DELTA = float(os.getenv("MAIN_TANK_SENSOR_PRINT_DELTA", "5"))
+FIRE_ALERT_TRUE_VALUES = {"1", "true", "on", "yes", "fire", "alert", "detected", "high"}
+FIRE_ALERT_FALSE_VALUES = {"0", "false", "off", "no", "safe", "normal", "clear", "none", "low"}
+FIRE_ALERT_TRUE_PHRASES = ("fire detected", "fire: yes", "fire: true", "fire: on", "fire: 1")
+FIRE_ALERT_FALSE_PHRASES = (
+    "no fire",
+    "fire not detected",
+    "no flame",
+    "flame not detected",
+    "fire: no",
+    "fire: false",
+    "fire: off",
+    "fire: 0",
+)
 
 
 class ConnectionStatusTracker:
@@ -584,10 +601,131 @@ class MainTankSensorWorker:
         return round(max(0.0, min(100.0, tank_level)), 1)
 
 
+def parse_fire_alert_value(raw_value):
+    text = str(raw_value or "").strip()
+    normalized = text.lower()
+    normalized = re.sub(r"\s+", " ", normalized)
+
+    if normalized in FIRE_ALERT_TRUE_VALUES:
+        return True
+    if normalized in FIRE_ALERT_FALSE_VALUES:
+        return False
+    if any(phrase in normalized for phrase in FIRE_ALERT_FALSE_PHRASES):
+        return False
+    if any(phrase in normalized for phrase in FIRE_ALERT_TRUE_PHRASES):
+        return True
+
+    number_match = re.search(r"-?\d+(?:\.\d+)?", normalized)
+    if number_match is not None:
+        return float(number_match.group(0)) != 0.0
+
+    raise ValueError(f"Could not parse fire sensor value from '{text}'")
+
+
+class FarmhouseFireSensorWorker:
+    def __init__(self):
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="farmhouse-fire-worker", daemon=True)
+        self._session = requests.Session()
+        self._status = ConnectionStatusTracker("FARMHOUSE FIRE SENSOR")
+        self._last_printed_value = None
+        self._read_lock = threading.Lock()
+        self._error_backoff_until = 0.0
+
+    def start(self):
+        self._thread.start()
+
+    def stop(self):
+        self._stop_event.set()
+        self._thread.join(timeout=3)
+        self._session.close()
+
+    def read_once(self):
+        fire_alert, raw_value, measured_at = self._fetch_fire_alert()
+
+        update_current(
+            {
+                "state": {
+                    "gh": {
+                        "fireAlert": fire_alert,
+                        "fireSensor": {
+                            "online": True,
+                            "lastUpdatedAt": measured_at,
+                            "raw": raw_value,
+                            "error": "",
+                        },
+                        "fireDataAt": measured_at,
+                    }
+                }
+            },
+            connected=False,
+            last_error="",
+        )
+        self._error_backoff_until = 0.0
+        self._status.report_success("sensor", FARMHOUSE_FIRE_SENSOR_URL)
+
+        if self._last_printed_value is None or self._last_printed_value != fire_alert:
+            print(f"Fire: {raw_value} ({'ALERT' if fire_alert else 'safe'})")
+            self._last_printed_value = fire_alert
+
+        return {
+            "fireAlert": fire_alert,
+            "raw": raw_value,
+            "url": FARMHOUSE_FIRE_SENSOR_URL,
+            "measuredAt": measured_at,
+        }
+
+    def _fetch_fire_alert(self):
+        with self._read_lock:
+            response = self._session.get(
+                FARMHOUSE_FIRE_SENSOR_URL,
+                timeout=FARMHOUSE_FIRE_SENSOR_TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+            raw_value = response.text.strip()
+            fire_alert = parse_fire_alert_value(raw_value)
+            measured_at = time.time()
+            return fire_alert, raw_value, measured_at
+
+    def _run(self):
+        while not self._stop_event.is_set():
+            now = time.time()
+            if now < self._error_backoff_until:
+                self._stop_event.wait(self._error_backoff_until - now)
+                continue
+
+            try:
+                self.read_once()
+            except Exception as error:
+                self._status.report_failure(
+                    "sensor",
+                    f"{FARMHOUSE_FIRE_SENSOR_URL}: {format_worker_error(error)}",
+                )
+                self._error_backoff_until = time.time() + FARMHOUSE_FIRE_SENSOR_ERROR_BACKOFF_SECONDS
+                update_current(
+                    {
+                        "state": {
+                            "gh": {
+                                "fireSensor": {
+                                    "online": False,
+                                    "lastUpdatedAt": None,
+                                    "raw": "",
+                                    "error": format_worker_error(error),
+                                }
+                            }
+                        }
+                    },
+                    connected=False,
+                    last_error="",
+                )
+            self._stop_event.wait(FARMHOUSE_FIRE_POLL_INTERVAL_SECONDS)
+
+
 plc_worker = PLCCommandWorker()
 esp_worker = ESPCommandWorker()
 control_worker = ControlLoopWorker(plc_worker, esp_worker)
 main_tank_sensor_worker = MainTankSensorWorker()
+farmhouse_fire_sensor_worker = FarmhouseFireSensorWorker()
 
 
 def parse_tank_level(raw_value):
@@ -634,6 +772,7 @@ def get_all_variables():
             "flowRate": state["flowRate"],
             "ghTemp": state["gh"]["temp"],
             "ghHumidity": state["gh"]["humidity"],
+            "ghFireAlert": state["gh"].get("fireAlert", False),
             "f1Moisture": state["f1"]["moisture"],
             "f1Ph": state["f1"]["ph"],
             "f1Wl": state["f1"]["wl"],
@@ -748,6 +887,7 @@ def print_selected_values():
     print(f"  pumping: {values['pumping']}")
     print(f"  ghTemp: {values['ghTemp']}")
     print(f"  ghHumidity: {values['ghHumidity']}")
+    print(f"  ghFireAlert: {values['ghFireAlert']}")
     print(f"  f1Moisture: {values['f1Moisture']} | f1Ph: {values['f1Ph']}")
     print(f"  f2Moisture: {values['f2Moisture']} | f2Ph: {values['f2Ph']}")
     print(f"  f3Moisture: {values['f3Moisture']} | f3Ph: {values['f3Ph']}")
@@ -973,6 +1113,43 @@ class UIBackendHandler(Handler):
         "f3": 3,
     }
 
+    def do_GET(self):
+        parsed = urlparse(self.path)
+
+        if parsed.path == "/api/fire":
+            try:
+                sensor_payload = farmhouse_fire_sensor_worker.read_once()
+                self.send_json({
+                    "ok": True,
+                    "fire": sensor_payload,
+                    "dashboard": CURRENT,
+                })
+            except Exception as error:
+                update_current(
+                    {
+                        "state": {
+                            "gh": {
+                                "fireSensor": {
+                                    "online": False,
+                                    "lastUpdatedAt": time.time(),
+                                    "raw": "",
+                                    "error": format_worker_error(error),
+                                }
+                            }
+                        }
+                    },
+                    connected=False,
+                    last_error="",
+                )
+                self.send_json({
+                    "ok": False,
+                    "error": str(error),
+                    "dashboard": CURRENT,
+                }, status=502)
+            return
+
+        super().do_GET()
+
     def do_POST(self):
         parsed = urlparse(self.path)
 
@@ -1193,6 +1370,7 @@ def shutdown_backend(server):
 
     control_worker.stop()
     main_tank_sensor_worker.stop()
+    farmhouse_fire_sensor_worker.stop()
 
     reset_state_for_shutdown()
 
@@ -1283,6 +1461,7 @@ if __name__ == "__main__":
     esp_worker.start()
     control_worker.start()
     main_tank_sensor_worker.start()
+    farmhouse_fire_sensor_worker.start()
     threading.Thread(target=simulation_loop, daemon=True).start()
 
     try:

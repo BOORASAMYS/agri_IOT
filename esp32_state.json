@@ -1,23 +1,30 @@
 {
   "deviceIp": "192.168.0.20",
   "connected": false,
-  "lastError": "Server stopped manually",
+  "lastError": "/status: <urlopen error timed out>; /data: <urlopen error timed out>; /: <urlopen error timed out>",
   "state": {
     "tank": 0.0,
     "tankSensor": {
-      "value": 0.0,
+      "value": 100.0,
       "online": true,
-      "lastUpdatedAt": 1776339179.4961212,
+      "lastUpdatedAt": 1776359712.0046194,
       "error": ""
     },
-    "pumping": false,
+    "pumping": true,
     "mainTankManualOverride": false,
     "flowRate": 0.0,
     "gh": {
-      "temp": 38.5,
-      "humidity": 52.0,
-      "fanOn": false,
-      "fireAlert": false
+      "temp": 20.0,
+      "humidity": 74.0,
+      "fireAlert": false,
+      "fireSensor": {
+        "online": true,
+        "lastUpdatedAt": 1776359711.7239003,
+        "raw": "No Fire",
+        "error": ""
+      },
+      "fanOn": true,
+      "fireDataAt": 1776359711.7239003
     },
     "f1": {
       "moisture": 0.0,
@@ -28,7 +35,7 @@
       "k": 0.0,
       "irrigation": false,
       "drain": false,
-      "acid": false,
+      "acid": true,
       "base": false
     },
     "f2": {
@@ -40,7 +47,7 @@
       "k": 0.0,
       "irrigation": false,
       "drain": false,
-      "acid": false,
+      "acid": true,
       "base": false
     },
     "f3": {
@@ -52,9 +59,9 @@
       "k": 0.0,
       "irrigation": false,
       "drain": false,
-      "acid": false,
+      "acid": true,
       "base": false
     },
-    "mainTankDataAt": 1776339179.4961212
+    "mainTankDataAt": 1776359712.0046194
   }
 }

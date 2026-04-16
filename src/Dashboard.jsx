@@ -45,7 +45,13 @@ const INITIAL_DASHBOARD_STATE = {
   pumping: true,
   mainTankManualOverride: null,
   flowRate: 2.4,
-  gh: { temp: 35, humidity: 65, fireAlert: false, fanOn: false },
+  gh: {
+    temp: 35,
+    humidity: 65,
+    fireAlert: false,
+    fanOn: false,
+    fireSensor: { online: false, lastUpdatedAt: null, raw: '', error: '' },
+  },
   f1: { moisture: 62.4, ph: 6.81, wl: 21.3, n: 42, p: 35, k: 55, irrigation: false, drain: true, acid: true, base: false },
   f2: { moisture: 60.8, ph: 8.10, wl: 13.3, n: 38, p: 28, k: 48, irrigation: false, drain: false, acid: false, base: true },
   f3: { moisture: 24, ph: 3.2, wl: 8.5, n: 22, p: 18, k: 31, irrigation: false, drain: false, acid: true, base: false },
@@ -62,7 +68,13 @@ const ZERO_DASHBOARD_STATE = {
   pumping: false,
   mainTankManualOverride: null,
   flowRate: 0,
-  gh: { temp: 0, humidity: 0, fireAlert: false, fanOn: false },
+  gh: {
+    temp: 0,
+    humidity: 0,
+    fireAlert: false,
+    fanOn: false,
+    fireSensor: { online: false, lastUpdatedAt: null, raw: '', error: '' },
+  },
   f1: { moisture: 0, ph: 0, wl: 0, n: 0, p: 0, k: 0, irrigation: false, drain: false, acid: false, base: false },
   f2: { moisture: 0, ph: 0, wl: 0, n: 0, p: 0, k: 0, irrigation: false, drain: false, acid: false, base: false },
   f3: { moisture: 0, ph: 0, wl: 0, n: 0, p: 0, k: 0, irrigation: false, drain: false, acid: false, base: false },
@@ -163,6 +175,7 @@ const AgricultureDashboard = () => {
   const tankDrainIntervalRef = useRef(null);
   const isResetDrainingRef = useRef(false);
   const lastMainTankDataAtRef = useRef(null);
+  const lastFireDataAtRef = useRef(null);
 
   const stopTankDrainAnimation = () => {
     if (tankDrainIntervalRef.current !== null) {
@@ -281,13 +294,19 @@ const AgricultureDashboard = () => {
     setState((prevState) => {
       const isResetDraining = isResetDrainingRef.current;
       const incomingMainTankDataAt = payloadState.mainTankDataAt ?? null;
+      const incomingFireDataAt = payloadState.gh?.fireDataAt ?? null;
       const incomingTank = payloadState.tank;
       const hasFreshMainTankTimestamp = incomingMainTankDataAt !== null && incomingMainTankDataAt !== lastMainTankDataAtRef.current;
       const hasTankValueChanged = typeof incomingTank === 'number' && incomingTank !== prevState.tank;
       const hasFreshMainTankData = hasFreshMainTankTimestamp || hasTankValueChanged;
+      const hasFreshFireData = incomingFireDataAt !== null && incomingFireDataAt !== lastFireDataAtRef.current;
 
       if (hasFreshMainTankTimestamp) {
         lastMainTankDataAtRef.current = incomingMainTankDataAt;
+      }
+
+      if (hasFreshFireData) {
+        lastFireDataAtRef.current = incomingFireDataAt;
       }
 
       ['f1', 'f2', 'f3'].forEach((fieldKey) => {
@@ -311,7 +330,13 @@ const AgricultureDashboard = () => {
         pumping: isResetDraining ? false : (payloadState.pumping ?? prevState.pumping),
         mainTankManualOverride: isResetDraining ? false : (payloadState.mainTankManualOverride ?? prevState.mainTankManualOverride ?? null),
         flowRate: isResetDraining ? 0 : (payloadState.flowRate ?? prevState.flowRate),
-        gh: { ...prevState.gh, ...(payloadState.gh || {}) },
+        gh: {
+          ...prevState.gh,
+          ...(payloadState.gh || {}),
+          fireAlert: hasFreshFireData
+            ? Boolean(payloadState.gh.fireAlert)
+            : (payloadState.gh?.fireAlert ?? prevState.gh.fireAlert),
+        },
         f1: activeEditFieldsRef.current.f1 ? prevState.f1 : (payloadState.f1 ?? prevState.f1),
         f2: activeEditFieldsRef.current.f2 ? prevState.f2 : (payloadState.f2 ?? prevState.f2),
         f3: activeEditFieldsRef.current.f3 ? prevState.f3 : (payloadState.f3 ?? prevState.f3),
@@ -403,7 +428,7 @@ const AgricultureDashboard = () => {
             ...prev.gh,
             temp: nextTemp,
             humidity: nextHumidity,
-            fireAlert: nextTemp >= 52,
+            fireAlert: Boolean(prev.gh.fireAlert) || nextTemp >= 52,
           },
           ...nextFields,
           time: new Date().toLocaleTimeString(),
@@ -430,10 +455,6 @@ const AgricultureDashboard = () => {
     let isCancelled = false;
 
     const refreshFromServer = async () => {
-      if (Date.now() - lastLocalUpdateRef.current < 1500) {
-        return;
-      }
-
       try {
         const response = await fetch(`${API_BASE}/status`);
         if (!response.ok) {
@@ -452,7 +473,7 @@ const AgricultureDashboard = () => {
     };
 
     refreshFromServer();
-    const intervalId = window.setInterval(refreshFromServer, 4000);
+    const intervalId = window.setInterval(refreshFromServer, 2000);
 
     return () => {
       isCancelled = true;
@@ -512,6 +533,7 @@ const AgricultureDashboard = () => {
     (state.gh.temp ?? 0) > GREENHOUSE_FAN_TEMP_THRESHOLD ||
     (state.gh.humidity ?? 0) > GREENHOUSE_FAN_HUMIDITY_THRESHOLD;
   const fireOn = state.gh.fireAlert;
+  const fireSensorStatus = fireOn ? 'Fire Detected' : 'Safe';
   const fanSpeedClass = fanOn ? "spin-med" : "spin-stop";
   const isMainTankReducedFlow = state.pumping && state.tank > MAIN_TANK_FLOW_REDUCE_PERCENT;
   const mainTankPumpSpeedClass = state.pumping
@@ -600,7 +622,6 @@ const AgricultureDashboard = () => {
   const buildGreenhousePayload = () => ({
     temp: state.gh.temp,
     humidity: state.gh.humidity,
-    fireAlert: state.gh.fireAlert,
   });
 
   const buildMainTankPayload = () => ({
@@ -2062,6 +2083,22 @@ const AgricultureDashboard = () => {
           font-weight: 800;
           color: #0d9488;
         }
+        .farmhouse-status {
+          flex: 1;
+          min-width: 0;
+          display: flex;
+          flex-direction: column;
+          gap: 3px;
+        }
+        .farmhouse-state {
+          font-size: 18px;
+          font-weight: 900;
+          color: #16a34a;
+          line-height: 1.1;
+        }
+        .farmhouse-state.active {
+          color: #dc2626;
+        }
         .farmhouse-alert {
           width: 46px;
           height: 46px;
@@ -2374,7 +2411,12 @@ const AgricultureDashboard = () => {
                 </div>
               </div>
               <div className="farmhouse-panel">
-                <div className="farmhouse-heading">Farm House</div>
+                <div className="farmhouse-status">
+                  <div className="farmhouse-heading">Farm House</div>
+                  <div className={`farmhouse-state ${fireOn ? 'active' : ''}`}>
+                    {fireSensorStatus}
+                  </div>
+                </div>
                 <div
                   className={`farmhouse-alert ${fireOn ? 'active' : ''}`}
                   onClick={() => updateGreenhouse({ fireAlert: !fireOn })}
