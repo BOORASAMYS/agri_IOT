@@ -35,13 +35,18 @@ from esp32connect import (
 
 def get_shutdown_command():
     is_root = hasattr(os, "geteuid") and os.geteuid() == 0
+    print(f"[SHUTDOWN CHECK] is_root={is_root}, geteuid={os.geteuid() if hasattr(os, 'geteuid') else 'N/A'}")
 
     if is_root:
+        print("[SHUTDOWN CHECK] Running as root, using direct shutdown command")
         return ["shutdown", "-h", "now"], None
 
     sudo_path = shutil.which("sudo")
+    print(f"[SHUTDOWN CHECK] sudo_path={sudo_path}")
+    
     if sudo_path:
         try:
+            print("[SHUTDOWN CHECK] Testing sudo permissions with 'sudo -n true'")
             sudo_check = subprocess.run(
                 [sudo_path, "-n", "true"],
                 capture_output=True,
@@ -49,11 +54,16 @@ def get_shutdown_command():
                 timeout=2,
                 check=False,
             )
+            print(f"[SHUTDOWN CHECK] sudo test returncode={sudo_check.returncode}")
         except Exception as error:
+            print(f"[SHUTDOWN CHECK] sudo test failed with exception: {error}")
             return None, f"Unable to verify sudo permission: {error}"
 
         if sudo_check.returncode == 0:
+            print("[SHUTDOWN CHECK] Sudo passwordless working, using sudo shutdown command")
             return [sudo_path, "-n", "shutdown", "-h", "now"], None
+        else:
+            print(f"[SHUTDOWN CHECK] sudo test failed. stdout={sudo_check.stdout}, stderr={sudo_check.stderr}")
 
     return None, (
         "Shutdown permission is not available for the backend user. "
@@ -1309,18 +1319,27 @@ class UIBackendHandler(Handler):
         parsed = urlparse(self.path)
 
         if parsed.path == "/api/shutdown":
+            print("[API SHUTDOWN] Shutdown endpoint called")
             if os.name != "posix":
+                print("[API SHUTDOWN] Not running on POSIX system")
                 self.send_json({"error": "System shutdown is only supported when the backend is running on Raspberry Pi/Linux."}, status=501)
                 return
 
             shutdown_command, shutdown_error = get_shutdown_command()
+            print(f"[API SHUTDOWN] get_shutdown_command returned: command={shutdown_command}, error={shutdown_error}")
+            
             if shutdown_command is None:
+                print(f"[API SHUTDOWN] Shutdown command is None, returning error to client")
                 self.send_json({"error": shutdown_error}, status=503)
                 return
 
+            print("[API SHUTDOWN] Starting shutdown sequence...")
             mark_shutdown_in_progress()
             relay_report = send_all_plc_motors_off(source="shutdown-precheck")
+            print(f"[API SHUTDOWN] Motor OFF completed: {relay_report}")
+            
             if relay_report["errors"]:
+                print(f"[API SHUTDOWN] Motor OFF errors: {relay_report['errors']}")
                 self.send_json(
                     {
                         "error": "Failed to send OFF to all PLC motors before shutdown.",
@@ -1336,7 +1355,10 @@ class UIBackendHandler(Handler):
                     "message": "All PLC motors turned OFF. Raspberry Pi shutdown started.",
                 }
             )
-            threading.Thread(target=perform_system_shutdown, args=(self.server, shutdown_command), daemon=True).start()
+            print(f"[API SHUTDOWN] Launching shutdown thread with command: {shutdown_command}")
+            # Use daemon=False so the thread can complete the shutdown before process exits
+            shutdown_thread = threading.Thread(target=perform_system_shutdown, args=(self.server, shutdown_command), daemon=False)
+            shutdown_thread.start()
             return
 
         if parsed.path == "/api/greenhouse":
@@ -1600,19 +1622,71 @@ def perform_system_shutdown(server, shutdown_command):
     except Exception as error:
         print(f"[BACKEND SHUTDOWN ERROR] {error}")
 
+    print("[SYSTEM SHUTDOWN] Waiting 5 seconds before initiating shutdown...")
     time.sleep(SHUTDOWN_DELAY_SECONDS)
 
+    shutdown_success = False
+    
+    # Try primary shutdown command
     try:
-        subprocess.Popen(
+        print(f"[SYSTEM SHUTDOWN] Executing: {' '.join(shutdown_command)}")
+        result = subprocess.run(
             shutdown_command,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
         )
+        print(f"[SYSTEM SHUTDOWN] Command completed with exit code: {result.returncode}")
+        if result.stdout:
+            print(f"[SYSTEM SHUTDOWN] stdout: {result.stdout}")
+        if result.stderr:
+            print(f"[SYSTEM SHUTDOWN] stderr: {result.stderr}")
+        
+        if result.returncode == 0:
+            shutdown_success = True
+            print("[SYSTEM SHUTDOWN] Primary command succeeded! Waiting 10 seconds for shutdown to complete...")
+            time.sleep(10)  # Give the system time to actually shut down
+    except subprocess.TimeoutExpired:
+        print(f"[SYSTEM SHUTDOWN ERROR] Command timed out after 10 seconds")
     except Exception as error:
         print(f"[SYSTEM SHUTDOWN ERROR] {error}")
-        return
 
+    # Fallback: If primary command failed, try alternative methods
+    if not shutdown_success:
+        print("[SYSTEM SHUTDOWN] Primary command failed, trying alternative shutdown methods...")
+        alternatives = [
+            ["shutdown", "-h", "0"],  # Alternative shutdown syntax
+            ["/sbin/shutdown", "-h", "now"],  # Absolute path
+            ["systemctl", "poweroff"],  # Using systemctl
+            ["poweroff"],  # Direct poweroff command
+        ]
+        
+        for alt_cmd in alternatives:
+            try:
+                print(f"[SYSTEM SHUTDOWN] Trying fallback: {' '.join(alt_cmd)}")
+                result = subprocess.run(
+                    alt_cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=5,
+                )
+                print(f"[SYSTEM SHUTDOWN] Fallback completed with exit code: {result.returncode}")
+                if result.returncode == 0:
+                    shutdown_success = True
+                    print("[SYSTEM SHUTDOWN] Fallback command succeeded! Waiting 10 seconds for shutdown to complete...")
+                    time.sleep(10)
+                    break
+            except Exception as e:
+                print(f"[SYSTEM SHUTDOWN] Fallback '{alt_cmd[0]}' failed: {e}")
+
+    if shutdown_success:
+        print("[SYSTEM SHUTDOWN] Shutdown command executed successfully")
+    else:
+        print("[SYSTEM SHUTDOWN] All shutdown attempts failed")
+
+    print("[SYSTEM SHUTDOWN] Exiting process with os._exit(0)")
     os._exit(0)
 
 
