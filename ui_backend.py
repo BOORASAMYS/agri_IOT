@@ -109,6 +109,7 @@ PLC_OFFLINE_COOLDOWN_SECONDS = float(os.getenv("PLC_OFFLINE_COOLDOWN", "20"))
 MAIN_TANK_SENSOR_ERROR_BACKOFF_SECONDS = float(os.getenv("MAIN_TANK_SENSOR_ERROR_BACKOFF", "20"))
 MAIN_TANK_RELAY_COMMAND_LOCK = threading.Lock()
 MAIN_TANK_LAST_REQUESTED_STATE = None
+SHUTDOWN_IN_PROGRESS = False
 MAIN_TANK_SENSOR_PRINT_DELTA = float(os.getenv("MAIN_TANK_SENSOR_PRINT_DELTA", "5"))
 FIRE_ALERT_TRUE_VALUES = {"1", "true", "on", "yes", "fire", "alert", "detected", "high"}
 FIRE_ALERT_FALSE_VALUES = {"0", "false", "off", "no", "safe", "normal", "clear", "none", "low"}
@@ -144,6 +145,26 @@ class ConnectionStatusTracker:
             print(f"[{self.label} ERROR] {detail}")
         elif failure_count % 10 == 0:
             print(f"[{self.label} ERROR] {detail} (repeated {failure_count} times)")
+
+
+def is_plc_off_command(command):
+    return command in {
+        RELAY_COMMANDS["main_tank"][False],
+        RELAY_COMMANDS["f1"][False],
+        RELAY_COMMANDS["f2"][False],
+        RELAY_COMMANDS["f3"][False],
+    }
+
+
+def is_shutdown_in_progress():
+    with STATE_LOCK:
+        return SHUTDOWN_IN_PROGRESS
+
+
+def mark_shutdown_in_progress():
+    global SHUTDOWN_IN_PROGRESS
+    with STATE_LOCK:
+        SHUTDOWN_IN_PROGRESS = True
 
 
 def should_main_tank_pump(tank, was_pumping=False):
@@ -220,6 +241,14 @@ class PLCCommandWorker:
         self._thread.join(timeout=3)
 
     def enqueue(self, command, source="control", wait=False, timeout=5.0):
+        if is_shutdown_in_progress() and not is_plc_off_command(command):
+            return {
+                "queued": False,
+                "skipped_shutdown": True,
+                "command": command,
+                "source": source,
+            }
+
         if not wait:
             with self._pending_lock:
                 if command in self._pending_commands:
@@ -271,6 +300,18 @@ class PLCCommandWorker:
                     raise PLCCooldownActiveError(
                         f"Skipping PLC retry for {remaining:.1f}s after recent connection failure"
                     )
+                if is_shutdown_in_progress() and not is_plc_off_command(message["command"]):
+                    message["result"] = {
+                        "queued": False,
+                        "skipped_shutdown": True,
+                        "command": message["command"],
+                        "source": message["source"],
+                    }
+                    self._status.report_success(
+                        "plc",
+                        f"skipped {message['command']} during shutdown",
+                    )
+                    continue
                 result = send_relay_command(message["command"])
                 message["result"] = result
                 self._offline_until = 0.0
@@ -494,6 +535,8 @@ class ControlLoopWorker:
 
     def _run(self):
         while not self._stop_event.is_set():
+            if is_shutdown_in_progress():
+                break
             time.sleep(1)
             self._process_irrigation_changes()
             self._process_greenhouse_changes()
@@ -1275,6 +1318,7 @@ class UIBackendHandler(Handler):
                 self.send_json({"error": shutdown_error}, status=503)
                 return
 
+            mark_shutdown_in_progress()
             relay_report = send_all_plc_motors_off(source="shutdown-precheck")
             if relay_report["errors"]:
                 self.send_json(
@@ -1546,26 +1590,6 @@ def shutdown_backend(server):
 
 
 def perform_system_shutdown(server, shutdown_command):
-    backend_pid = os.getpid()
-
-    try:
-        shell_command = (
-            f"sleep {SHUTDOWN_DELAY_SECONDS:g}; "
-            "sudo -n /usr/sbin/shutdown -h now >/tmp/agri-shutdown.log 2>&1; "
-            f"kill -TERM {backend_pid} >/dev/null 2>&1 || true"
-        )
-        subprocess.Popen(
-            ["/bin/sh", "-c", shell_command],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-    except Exception as error:
-        print(f"[SYSTEM SHUTDOWN ERROR] {error}")
-        return
-
-    time.sleep(0.3)
-
     try:
         server.shutdown()
     except Exception as error:
@@ -1575,6 +1599,19 @@ def perform_system_shutdown(server, shutdown_command):
         shutdown_backend(server)
     except Exception as error:
         print(f"[BACKEND SHUTDOWN ERROR] {error}")
+
+    time.sleep(SHUTDOWN_DELAY_SECONDS)
+
+    try:
+        subprocess.Popen(
+            shutdown_command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception as error:
+        print(f"[SYSTEM SHUTDOWN ERROR] {error}")
+        return
 
     os._exit(0)
 
