@@ -827,6 +827,8 @@ const AgricultureDashboard = () => {
     const pendingLivePatchRef = useRef({});
     const livePatchFrameRef = useRef(null);
     const moistureAnimationFrameRef = useRef(null);
+    const moistureAdjustTimeoutRef = useRef(null);
+    const moistureAdjustIntervalRef = useRef(null);
     const moistureTargetRef = useRef(data.moisture);
     const moistureDisplayRef = useRef(data.moisture);
     const patchTimeoutRef = useRef(null);
@@ -940,6 +942,41 @@ const AgricultureDashboard = () => {
       moistureDisplayRef.current = normalized;
       setLivePatch({ moisture: normalized, wl: linkedWaterLevel });
       scheduleFieldPatch({ moisture: normalized, wl: linkedWaterLevel });
+    };
+    const adjustMoistureValue = (delta) => {
+      activeEditFieldsRef.current[fieldKey] = true;
+      stopMoistureAnimation();
+      const next = Number((moistureValue + delta).toFixed(1));
+      moistureTargetRef.current = clamp(next, 0, 100);
+      setMoistureDisplayValue(moistureTargetRef.current);
+      window.setTimeout(() => {
+        activeEditFieldsRef.current[fieldKey] = false;
+      }, 250);
+    };
+    const stopMoistureButtonAdjust = () => {
+      if (moistureAdjustTimeoutRef.current !== null) {
+        window.clearTimeout(moistureAdjustTimeoutRef.current);
+        moistureAdjustTimeoutRef.current = null;
+      }
+      if (moistureAdjustIntervalRef.current !== null) {
+        window.clearInterval(moistureAdjustIntervalRef.current);
+        moistureAdjustIntervalRef.current = null;
+      }
+    };
+    const startMoistureButtonAdjust = (delta, event) => {
+      event.preventDefault();
+      if (typeof event.currentTarget?.setPointerCapture === 'function') {
+        try {
+          event.currentTarget.setPointerCapture(event.pointerId);
+        } catch {}
+      }
+      stopMoistureButtonAdjust();
+      adjustMoistureValue(delta);
+      moistureAdjustTimeoutRef.current = window.setTimeout(() => {
+        moistureAdjustIntervalRef.current = window.setInterval(() => {
+          adjustMoistureValue(delta);
+        }, 120);
+      }, 260);
     };
     const animateMoistureTowardTarget = () => {
       moistureAnimationFrameRef.current = null;
@@ -1127,6 +1164,7 @@ const AgricultureDashboard = () => {
         if (patchTimeoutRef.current !== null) {
           window.clearTimeout(patchTimeoutRef.current);
         }
+        stopMoistureButtonAdjust();
         endDrag();
         unbindGlobalDragListeners();
       };
@@ -1148,59 +1186,86 @@ const AgricultureDashboard = () => {
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: 'minmax(170px, 1.35fr) minmax(90px, 0.8fr) minmax(120px, 1fr)', columnGap: '6px', rowGap: '14px', alignItems: 'start' }}>
           <div className="col">
-            <div className="moisture-gauge" style={{ cursor: isMoistureDragging ? 'grabbing' : 'grab' }} title="Drag needle left/right to set moisture">
-              <svg
-                ref={moistureGaugeRef}
-                className="moisture-gauge-svg"
-                width="164"
-                height="112"
-                viewBox="0 0 164 112"
-                style={{ overflow: 'visible', touchAction: 'none' }}
-                onMouseDown={(event) => {
-                  event.preventDefault();
-                  startDrag({ type: 'moisture' }, event.clientX, event.clientY);
-                  setMoistureFromPointer(event.clientX, event.clientY, { immediate: true });
-                  bindGlobalDragListeners();
-                }}
-                onTouchStart={(event) => {
-                  if (!event.touches[0]) return;
-                  if (event.cancelable) event.preventDefault();
-                  startDrag({ type: 'moisture' }, event.touches[0].clientX, event.touches[0].clientY);
-                  lockTouchScroll();
-                  setMoistureFromPointer(event.touches[0].clientX, event.touches[0].clientY, { immediate: true });
-                  bindGlobalDragListeners();
-                }}
-              >
-                <path d="M24 72 A54 54 0 0 1 132 72" fill="none" stroke="#dbe4f0" strokeWidth="13" strokeLinecap="round" />
-                <path
-                  d="M24 72 A54 54 0 0 1 132 72"
-                  fill="none"
-                  stroke={mc}
-                  strokeWidth="13"
-                  strokeLinecap="round"
-                  strokeDasharray={`${(moistureValue / 100) * 170} 170`}
-                  className="gauge-arc"
-                />
-                <g className={`moisture-needle ${isMoistureDragging ? 'dragging' : ''}`} style={{ transform: `rotate(${moistureAngle}deg)`, transformOrigin: '78px 72px' }}>
-                  <line x1="78" y1="72" x2="78" y2="26" stroke="#64748b" strokeWidth="4" strokeLinecap="round" />
-                  <circle cx="78" cy="26" r="4.5" fill="#64748b" />
-                </g>
-                <circle
-                  className={`moisture-needle-hitbox ${isMoistureDragging ? 'dragging' : ''}`}
-                  cx="78"
-                  cy="26"
-                  r="16"
-                  fill="transparent"
-                  style={{ transform: `rotate(${moistureAngle}deg)`, transformOrigin: '78px 72px' }}
-                />
-                <circle cx="78" cy="72" r="11" fill="#ffffff" stroke="#cbd5e1" strokeWidth="2" />
-                <circle cx="78" cy="72" r="5.5" fill={mc} />
-                <text x="7" y="82" fontSize="11" fontWeight="800" fill="#475569">0</text>
-                <text x="74" y="10" fontSize="11" fontWeight="800" fill="#475569">50</text>
-                <text x="137" y="82" fontSize="11" fontWeight="800" fill="#475569">100</text>
-                <rect x="48" y="80" width="60" height="28" rx="14" fill="#ffffff" stroke="#cbd5e1" strokeWidth="2" />
-                <text x="78" y="98" textAnchor="middle" fontSize="15" fontWeight="700" fill="#0f172a">{moistureValue.toFixed(1)}%</text>
-              </svg>
+            <div className="moisture-control-stack">
+              <div className="moisture-gauge" style={{ cursor: isMoistureDragging ? 'grabbing' : 'grab' }} title="Drag needle left/right to set moisture">
+                <svg
+                  ref={moistureGaugeRef}
+                  className="moisture-gauge-svg"
+                  width="164"
+                  height="112"
+                  viewBox="0 0 164 112"
+                  style={{ overflow: 'visible', touchAction: 'none' }}
+                  onMouseDown={(event) => {
+                    event.preventDefault();
+                    startDrag({ type: 'moisture' }, event.clientX, event.clientY);
+                    setMoistureFromPointer(event.clientX, event.clientY, { immediate: true });
+                    bindGlobalDragListeners();
+                  }}
+                  onTouchStart={(event) => {
+                    if (!event.touches[0]) return;
+                    if (event.cancelable) event.preventDefault();
+                    startDrag({ type: 'moisture' }, event.touches[0].clientX, event.touches[0].clientY);
+                    lockTouchScroll();
+                    setMoistureFromPointer(event.touches[0].clientX, event.touches[0].clientY, { immediate: true });
+                    bindGlobalDragListeners();
+                  }}
+                >
+                  <path d="M24 72 A54 54 0 0 1 132 72" fill="none" stroke="#dbe4f0" strokeWidth="13" strokeLinecap="round" />
+                  <path
+                    d="M24 72 A54 54 0 0 1 132 72"
+                    fill="none"
+                    stroke={mc}
+                    strokeWidth="13"
+                    strokeLinecap="round"
+                    strokeDasharray={`${(moistureValue / 100) * 170} 170`}
+                    className="gauge-arc"
+                  />
+                  <g className={`moisture-needle ${isMoistureDragging ? 'dragging' : ''}`} style={{ transform: `rotate(${moistureAngle}deg)`, transformOrigin: '78px 72px' }}>
+                    <line x1="78" y1="72" x2="78" y2="26" stroke="#64748b" strokeWidth="4" strokeLinecap="round" />
+                    <circle cx="78" cy="26" r="4.5" fill="#64748b" />
+                  </g>
+                  <circle
+                    className={`moisture-needle-hitbox ${isMoistureDragging ? 'dragging' : ''}`}
+                    cx="78"
+                    cy="26"
+                    r="16"
+                    fill="transparent"
+                    style={{ transform: `rotate(${moistureAngle}deg)`, transformOrigin: '78px 72px' }}
+                  />
+                  <circle cx="78" cy="72" r="11" fill="#ffffff" stroke="#cbd5e1" strokeWidth="2" />
+                  <circle cx="78" cy="72" r="5.5" fill={mc} />
+                  <text x="7" y="82" fontSize="11" fontWeight="800" fill="#475569">0</text>
+                  <text x="74" y="10" fontSize="11" fontWeight="800" fill="#475569">50</text>
+                  <text x="137" y="82" fontSize="11" fontWeight="800" fill="#475569">100</text>
+                </svg>
+              </div>
+              <div className="moisture-value-row">
+                <button
+                  type="button"
+                  className="moisture-step-btn"
+                  onPointerDown={(event) => startMoistureButtonAdjust(-1, event)}
+                  onPointerUp={stopMoistureButtonAdjust}
+                  onPointerCancel={stopMoistureButtonAdjust}
+                  onLostPointerCapture={stopMoistureButtonAdjust}
+                  aria-label={`Decrease ${title} moisture`}
+                  title="Decrease moisture"
+                >
+                  -
+                </button>
+                <div className="moisture-value-pill">{moistureValue.toFixed(1)}%</div>
+                <button
+                  type="button"
+                  className="moisture-step-btn"
+                  onPointerDown={(event) => startMoistureButtonAdjust(1, event)}
+                  onPointerUp={stopMoistureButtonAdjust}
+                  onPointerCancel={stopMoistureButtonAdjust}
+                  onLostPointerCapture={stopMoistureButtonAdjust}
+                  aria-label={`Increase ${title} moisture`}
+                  title="Increase moisture"
+                >
+                  +
+                </button>
+              </div>
             </div>
             <span className="lbl">Moisture</span>
           </div>
@@ -1877,6 +1942,59 @@ const AgricultureDashboard = () => {
         .ph-track { width: 100%; height: 10px; border-radius: 5px; background: linear-gradient(to right, #ef4444, #f97316, #eab308, #22c55e, #06b6d4, #3b82f6, #8b5cf6); position: relative; margin: 5px 0; touch-action: none; }
         .ph-dot { width: 13px; height: 13px; background: #1e293b; border-radius: 50%; position: absolute; top: -1.5px; transform: translateX(-50%); transition: left 80ms linear; border: 2px solid #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.3); will-change: left; }
         .ph-dot.dragging { transition: none; }
+        .moisture-control-stack {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          gap: 6px;
+        }
+        .moisture-value-row {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          gap: 12px;
+        }
+        .moisture-step-btn {
+          width: 28px;
+          height: 28px;
+          border: none;
+          border-radius: 999px;
+          background: linear-gradient(180deg, #f8fbff 0%, #edf4ff 100%);
+          color: #0f172a;
+          font-size: 18px;
+          font-weight: 800;
+          line-height: 1;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          cursor: pointer;
+          box-shadow: 0 4px 10px rgba(59, 130, 246, 0.14);
+          transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+        }
+        .moisture-step-btn:hover {
+          transform: translateY(-1px);
+          background: linear-gradient(180deg, #ffffff 0%, #e6f0ff 100%);
+          box-shadow: 0 7px 15px rgba(59, 130, 246, 0.18);
+        }
+        .moisture-step-btn:active {
+          transform: translateY(0);
+        }
+        .moisture-value-pill {
+          min-width: 78px;
+          height: 34px;
+          padding: 0 14px;
+          border-radius: 999px;
+          background: #ffffff;
+          border: 2px solid #cbd5e1;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 15px;
+          font-weight: 800;
+          color: #0f172a;
+          box-shadow: 0 4px 10px rgba(15, 23, 42, 0.08);
+        }
         .moisture-gauge {
           width: 164px;
           height: 112px;
