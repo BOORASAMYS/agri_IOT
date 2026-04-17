@@ -6,25 +6,25 @@
     "tank": 0.0,
     "tankSensor": {
       "value": 0.0,
-      "online": true,
-      "lastUpdatedAt": 1776368467.141259,
-      "error": ""
+      "online": false,
+      "lastUpdatedAt": null,
+      "error": "ConnectTimeout: HTTPConnectionPool(host='192.168.0.4', port=80): Max retries exceeded with url: /tank (Caused by ConnectTimeoutError(<urllib3.connection.HTTPConnection object at 0x00000168320B8350>, 'Connection to 192.168.0.4 timed out. (connect timeout=0.8)'))"
     },
     "pumping": false,
     "mainTankManualOverride": false,
     "flowRate": 0.0,
     "gh": {
       "temp": 40.0,
-      "humidity": 74.0,
+      "humidity": 90.0,
       "fireAlert": false,
       "fireSensor": {
         "online": true,
-        "lastUpdatedAt": 1776368466.5080535,
+        "lastUpdatedAt": 1776404679.0520623,
         "raw": "No Fire",
         "error": ""
       },
       "fanOn": false,
-      "fireDataAt": 1776368466.5080535
+      "fireDataAt": 1776404679.0520623
     },
     "f1": {
       "moisture": 0.0,
@@ -62,6 +62,6 @@
       "acid": false,
       "base": false
     },
-    "mainTankDataAt": 1776368467.141259
+    "mainTankDataAt": 1776404661.8951662
   }
 }

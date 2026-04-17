@@ -109,6 +109,14 @@ const waterLevelToMoisture = (waterLevel) => Number(clampValue((waterLevel / 30)
 const canFieldStartIrrigation = (fieldKey, field) => shouldFieldIrrigate(fieldKey, field, false);
 const shouldFieldIrrigate = (fieldKey, field, wasIrrigating = false) => {
   const moisture = Number(field?.moisture ?? 0);
+  const ph = Number(field?.ph ?? PH_TARGET);
+  const hasUnsafePhOverrideAtHighLevel = (
+    (fieldKey === 'f1' || fieldKey === 'f2')
+    && moisture >= IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD
+    && (ph < 4 || ph > 10)
+  );
+
+  if (hasUnsafePhOverrideAtHighLevel) return true;
   if (moisture >= IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD) return false;
   if (moisture < IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD) return true;
   return Boolean(wasIrrigating);

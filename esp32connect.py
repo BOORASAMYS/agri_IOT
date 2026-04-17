@@ -194,6 +194,15 @@ def is_ph_out_of_range(ph):
 
 def resolve_auto_irrigation(field_key, field, currently_irrigating=False):
     moisture = number_from_value(field.get("moisture"), IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD)
+    ph = number_from_value(field.get("ph"), IRRIGATION_PH_TARGET)
+    has_unsafe_ph_override_at_high_moisture = (
+        field_key in {"f1", "f2"}
+        and moisture >= IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD
+        and (ph < 4.0 or ph > 10.0)
+    )
+
+    if has_unsafe_ph_override_at_high_moisture:
+        return True, "ph"
     if moisture >= IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD:
         return False, None
     if moisture < IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD:
