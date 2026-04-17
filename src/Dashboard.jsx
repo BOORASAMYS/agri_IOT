@@ -1505,9 +1505,12 @@ const AgricultureDashboard = () => {
         .navbar-action-btn.shutdown {
           display: inline-flex;
           align-items: center;
-          gap: 10px;
+          justify-content: center;
           background: linear-gradient(135deg, #7f1d1d 0%, #dc2626 100%);
-          padding-right: 18px;
+          width: 56px;
+          height: 56px;
+          padding: 0;
+          border-radius: 50%;
           box-shadow: 0 10px 24px rgba(127, 29, 29, 0.3);
         }
 
@@ -1536,10 +1539,6 @@ const AgricultureDashboard = () => {
           background: rgba(255, 255, 255, 0.95);
           transform: translateX(-50%);
           box-shadow: 0 0 10px rgba(255, 255, 255, 0.24);
-        }
-
-        .shutdown-label {
-          letter-spacing: 0.02em;
         }
 
         .navbar-action-btn:disabled {
@@ -2231,9 +2230,6 @@ const AgricultureDashboard = () => {
               aria-label="Shut down Raspberry Pi"
             >
               <span className="shutdown-power-icon" aria-hidden="true"></span>
-              <span className="shutdown-label">
-               
-              </span>
             </button>
           </div>
         </div>
