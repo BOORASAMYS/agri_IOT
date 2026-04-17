@@ -463,6 +463,7 @@ class ControlLoopWorker:
         self.esp_worker = esp_worker
         self._last_irrigation = {"f1": False, "f2": False, "f3": False}
         self._last_greenhouse_fan = None
+        self._last_esp_payloads = {1: None, 2: None, 3: None, 4: None}
         self._stop_event = threading.Event()
         self._thread = threading.Thread(target=self._run, name="control-worker", daemon=True)
 
@@ -478,6 +479,7 @@ class ControlLoopWorker:
             time.sleep(1)
             self._process_irrigation_changes()
             self._process_greenhouse_changes()
+            self._process_esp_value_changes()
 
     def _process_irrigation_changes(self):
         changes = []
@@ -532,6 +534,23 @@ class ControlLoopWorker:
 
         self._last_greenhouse_fan = current_fan
         enqueue_esp_sync(4, source="greenhouse-auto")
+
+    def _process_esp_value_changes(self):
+        for esp_num in (1, 2, 3, 4):
+            try:
+                payload = get_esp_payload_from_state(esp_num)
+            except Exception as error:
+                print(f"[ESP PAYLOAD ERROR] ESP{esp_num}: {format_worker_error(error)}")
+                continue
+
+            if payload == self._last_esp_payloads[esp_num]:
+                continue
+
+            try:
+                enqueue_esp_sync(esp_num, source="value-sync")
+                self._last_esp_payloads[esp_num] = deepcopy(payload)
+            except Exception as error:
+                print(f"[ESP SYNC ERROR] ESP{esp_num}: {format_worker_error(error)}")
 
 
 class MainTankSensorWorker:
