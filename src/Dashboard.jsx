@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import cyberLancersLogo from './assets/CyberLancers_Logo.svg';
 import cdacLogo from './assets/cdac-logo.svg';
 import cyberMainSplash from './assets/Cyber_Main.png';
@@ -12,7 +12,7 @@ const FIELD_ENDPOINTS = {
 const GREENHOUSE_ENDPOINT = `${API_BASE}/greenhouse`;
 const MAIN_TANK_ENDPOINT = `${API_BASE}/main-tank`;
 const SHUTDOWN_ENDPOINT = `${API_BASE}/shutdown`;
-const DRAG_COMMIT_INTERVAL_MS = 90;
+const DRAG_COMMIT_INTERVAL_MS = 30;
 const GREENHOUSE_FAN_TEMP_THRESHOLD = 40;
 const GREENHOUSE_FAN_HUMIDITY_THRESHOLD = 70;
 const MAIN_TANK_CAPACITY_ML = 500;
@@ -783,7 +783,7 @@ const AgricultureDashboard = () => {
   const StatusChip = ({ on, label, onClick, activeColor = '#16a34a' }) => (
     <span
       onClick={onClick}
-      style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '4px', width: '100%', fontSize: '20px', fontWeight: 700, color: on ? activeColor : '#94a3b8', cursor: 'pointer', userSelect: 'none', textAlign: 'center' }}
+      style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '4px', width: '100%', fontSize: '24px', fontWeight: 700, color: on ? activeColor : '#94a3b8', cursor: 'pointer', userSelect: 'none', textAlign: 'center' }}
       title={`Toggle ${label}`}
     >
       <span className="dot" style={{ background: on ? activeColor : '#cbd5e1' }}></span>
@@ -832,8 +832,8 @@ const AgricultureDashboard = () => {
     const livePatchFrameRef = useRef(null);
     const moistureAnimationFrameRef = useRef(null);
     const moistureAdjustIntervalRef = useRef(null);
+    const moistureAdjustHoldTimeoutRef = useRef(null);
     const moistureAdjustDirectionRef = useRef(0);
-    const moistureButtonReleaseCleanupRef = useRef(null);
     const moistureTargetRef = useRef(data.moisture);
     const moistureDisplayRef = useRef(data.moisture);
     const patchTimeoutRef = useRef(null);
@@ -948,47 +948,60 @@ const AgricultureDashboard = () => {
       setLivePatch({ moisture: normalized, wl: linkedWaterLevel });
       scheduleFieldPatch({ moisture: normalized, wl: linkedWaterLevel });
     };
-    const triggerMoistureButtonAction = (direction) => {
+    const triggerMoistureButtonAction = useCallback((direction) => {
       activeEditFieldsRef.current[fieldKey] = true;
-      if (direction > 0) {
-        updateField({ irrigation: true, drain: false });
-        return;
-      }
-      updateField({ irrigation: false, drain: true });
-    };
+      const currentMoisture = moistureDisplayRef.current ?? moistureValue;
+      const step = 1; // 1% per step
+      const nextMoisture = currentMoisture + (direction * step);
+      const normalized = Number(clamp(nextMoisture, 0, 100).toFixed(1));
+      const linkedWaterLevel = moistureToWaterLevel(normalized);
+      
+      // Update display ref immediately
+      moistureDisplayRef.current = normalized;
+      
+      // Update local field state for immediate visual feedback
+      setLiveField((prev) => ({ 
+        ...(prev ?? {}), 
+        moisture: normalized, 
+        wl: linkedWaterLevel,
+        // Preserve other values
+        ph: prev?.ph ?? data.ph,
+        n: prev?.n ?? data.n,
+        p: prev?.p ?? data.p,
+        k: prev?.k ?? data.k,
+        irrigation: prev?.irrigation ?? data.irrigation,
+        drain: prev?.drain ?? data.drain,
+        acid: prev?.acid ?? data.acid,
+        base: prev?.base ?? data.base
+      }));
+      
+      // Schedule backend patch at normal throttle rate (30ms batching)
+      scheduleFieldPatch({ moisture: normalized, wl: linkedWaterLevel });
+    }, [fieldKey, moistureValue, data]);
     const releaseMoistureButtonAction = (direction) => {
-      if (direction > 0) {
-        updateField({ irrigation: false });
-      } else {
-        updateField({ drain: false });
+      // Clear timers immediately to stop continuous updates
+      if (moistureAdjustHoldTimeoutRef.current !== null) {
+        window.clearTimeout(moistureAdjustHoldTimeoutRef.current);
+        moistureAdjustHoldTimeoutRef.current = null;
       }
+      if (moistureAdjustIntervalRef.current !== null) {
+        window.clearInterval(moistureAdjustIntervalRef.current);
+        moistureAdjustIntervalRef.current = null;
+      }
+      // Reset direction so any residual interval calls early-exit
+      moistureAdjustDirectionRef.current = 0;
+      // Keep the active flag alive for 3 seconds to prevent server sync from overwriting
+      // This prevents stale server values from overwriting local edits during the sync cycle
       window.setTimeout(() => {
         activeEditFieldsRef.current[fieldKey] = false;
-      }, 250);
-    };
-    const bindMoistureButtonReleaseListeners = () => {
-      if (moistureButtonReleaseCleanupRef.current || typeof document === 'undefined') return;
-      const stopAdjust = () => {
-        if (moistureAdjustDirectionRef.current !== 0) {
-          handleMoistureButtonRelease(moistureAdjustDirectionRef.current);
-        }
-      };
-      document.addEventListener('mouseup', stopAdjust);
-      document.addEventListener('touchend', stopAdjust);
-      document.addEventListener('touchcancel', stopAdjust);
-      moistureButtonReleaseCleanupRef.current = () => {
-        document.removeEventListener('mouseup', stopAdjust);
-        document.removeEventListener('touchend', stopAdjust);
-        document.removeEventListener('touchcancel', stopAdjust);
-      };
-    };
-    const unbindMoistureButtonReleaseListeners = () => {
-      if (!moistureButtonReleaseCleanupRef.current) return;
-      moistureButtonReleaseCleanupRef.current();
-      moistureButtonReleaseCleanupRef.current = null;
+      }, 3000);
     };
     const stopMoistureButtonAdjust = () => {
-      unbindMoistureButtonReleaseListeners();
+      // Clear all timers
+      if (moistureAdjustHoldTimeoutRef.current !== null) {
+        window.clearTimeout(moistureAdjustHoldTimeoutRef.current);
+        moistureAdjustHoldTimeoutRef.current = null;
+      }
       if (moistureAdjustIntervalRef.current !== null) {
         window.clearInterval(moistureAdjustIntervalRef.current);
         moistureAdjustIntervalRef.current = null;
@@ -999,16 +1012,25 @@ const AgricultureDashboard = () => {
     const startMoistureButtonAdjust = (direction, event) => {
       if (event.cancelable) event.preventDefault();
       stopMoistureButtonAdjust();
+      
+      activeEditFieldsRef.current[fieldKey] = true;
       moistureAdjustDirectionRef.current = direction;
-      bindMoistureButtonReleaseListeners();
+      
+      // Immediate update on pointerdown
       triggerMoistureButtonAction(direction);
-      moistureAdjustIntervalRef.current = window.setInterval(() => {
-        triggerMoistureButtonAction(direction);
-      }, 100);
+      
+      // Start hold timer - after 500ms, begin rapid-fire updates every 50ms
+      moistureAdjustHoldTimeoutRef.current = window.setTimeout(() => {
+        moistureAdjustHoldTimeoutRef.current = null;
+        moistureAdjustIntervalRef.current = window.setInterval(() => {
+          if (moistureAdjustDirectionRef.current !== 0) {
+            triggerMoistureButtonAction(moistureAdjustDirectionRef.current);
+          }
+        }, 50);
+      }, 500);
     };
     const handleMoistureButtonRelease = (direction) => {
-      if (moistureAdjustIntervalRef.current === null) return;
-      stopMoistureButtonAdjust();
+      if (moistureAdjustDirectionRef.current === 0) return;
       releaseMoistureButtonAction(direction);
     };
     const animateMoistureTowardTarget = () => {
@@ -1182,11 +1204,15 @@ const AgricultureDashboard = () => {
     };
 
     useEffect(() => {
-      if (!activeDragRef.current || activeDragRef.current.type !== 'moisture') {
+      // Only reset refs if not actively dragging, not holding button, and not in active edit mode
+      const isHoldingButton = moistureAdjustDirectionRef.current !== 0;
+      if ((!activeDragRef.current || activeDragRef.current.type !== 'moisture') 
+          && !activeEditFieldsRef.current[fieldKey]
+          && !isHoldingButton) {
         moistureDisplayRef.current = moistureValue;
         moistureTargetRef.current = moistureValue;
       }
-    }, [moistureValue]);
+    }, [moistureValue, fieldKey]);
 
     useEffect(() => {
       return () => {
@@ -1248,7 +1274,7 @@ const AgricultureDashboard = () => {
                     strokeWidth="13"
                     strokeLinecap="round"
                     strokeDasharray={`${(moistureValue / 100) * 170} 170`}
-                    className="gauge-arc"
+                    className={`gauge-arc ${isMoistureDragging ? 'dragging' : ''}`}
                   />
                   <g className={`moisture-needle ${isMoistureDragging ? 'dragging' : ''}`} style={{ transform: `rotate(${moistureAngle}deg)`, transformOrigin: '78px 72px' }}>
                     <line x1="78" y1="72" x2="78" y2="26" stroke="#64748b" strokeWidth="4" strokeLinecap="round" />
@@ -1264,21 +1290,18 @@ const AgricultureDashboard = () => {
                   />
                   <circle cx="78" cy="72" r="11" fill="#ffffff" stroke="#cbd5e1" strokeWidth="2" />
                   <circle cx="78" cy="72" r="5.5" fill={mc} />
-                  <text x="7" y="82" fontSize="11" fontWeight="800" fill="#475569">0</text>
-                  <text x="74" y="10" fontSize="11" fontWeight="800" fill="#475569">50</text>
-                  <text x="137" y="82" fontSize="11" fontWeight="800" fill="#475569">100</text>
+                  <text x="7" y="82" fontSize="16" fontWeight="800" fill="#475569">0</text>
+                  <text x="74" y="10" fontSize="16" fontWeight="800" fill="#475569">50</text>
+                  <text x="137" y="82" fontSize="16" fontWeight="800" fill="#475569">100</text>
                 </svg>
               </div>
               <div className="moisture-value-row">
                 <button
                   type="button"
                   className="moisture-step-btn"
-                  onMouseDown={(event) => startMoistureButtonAdjust(-1, event)}
-                  onMouseUp={() => handleMoistureButtonRelease(-1)}
-                  onMouseLeave={() => handleMoistureButtonRelease(-1)}
-                  onTouchStart={(event) => startMoistureButtonAdjust(-1, event)}
-                  onTouchEnd={() => handleMoistureButtonRelease(-1)}
-                  onTouchCancel={() => handleMoistureButtonRelease(-1)}
+                  onPointerDown={(event) => startMoistureButtonAdjust(-1, event)}
+                  onPointerUp={() => handleMoistureButtonRelease(-1)}
+                  onPointerLeave={() => handleMoistureButtonRelease(-1)}
                   onBlur={() => handleMoistureButtonRelease(-1)}
                   aria-label={`Decrease ${title} moisture`}
                   title="Decrease moisture"
@@ -1289,12 +1312,9 @@ const AgricultureDashboard = () => {
                 <button
                   type="button"
                   className="moisture-step-btn"
-                  onMouseDown={(event) => startMoistureButtonAdjust(1, event)}
-                  onMouseUp={() => handleMoistureButtonRelease(1)}
-                  onMouseLeave={() => handleMoistureButtonRelease(1)}
-                  onTouchStart={(event) => startMoistureButtonAdjust(1, event)}
-                  onTouchEnd={() => handleMoistureButtonRelease(1)}
-                  onTouchCancel={() => handleMoistureButtonRelease(1)}
+                  onPointerDown={(event) => startMoistureButtonAdjust(1, event)}
+                  onPointerUp={() => handleMoistureButtonRelease(1)}
+                  onPointerLeave={() => handleMoistureButtonRelease(1)}
                   onBlur={() => handleMoistureButtonRelease(1)}
                   aria-label={`Increase ${title} moisture`}
                   title="Increase moisture"
@@ -1337,7 +1357,7 @@ const AgricultureDashboard = () => {
             <span className="lbl" style={{ marginLeft: '-45px' }}>Water</span>
           </div>
           <div className="col" style={{ width: '100%' }}>
-            <div style={{ width: '100%', fontSize: '10px', color: '#475569', fontWeight: 700, display: 'flex', justifyContent: 'space-between' }}><span>0</span><span>7</span><span>14</span></div>
+            <div style={{ width: '100%', fontSize: '14px', color: '#475569', fontWeight: 700, display: 'flex', justifyContent: 'space-between' }}><span>0</span><span>7</span><span>14</span></div>
             <div
               ref={phTrackRef}
               className={`ph-track ${dragTarget === 'ph' ? 'dragging' : ''}`}
@@ -1360,15 +1380,15 @@ const AgricultureDashboard = () => {
             >
               <div className={`ph-dot ${dragTarget === 'ph' ? 'dragging' : ''}`} style={{ left: `${phPct}%` }}></div>
             </div>
-            <div style={{ textAlign: 'center', fontSize: '20px', fontWeight: '900', color: phColor(phValue) }}>{phValue.toFixed(2)}</div>
+            <div style={{ textAlign: 'center', fontSize: '24px', fontWeight: '900', color: phColor(phValue) }}>{phValue.toFixed(2)}</div>
             <span className="lbl">pH</span>
           </div>
         </div>
         <div style={{ marginTop: '14px' }}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
             {[ {l:'N', key:'n', v:nValue, c:'#22c55e'}, {l:'P', key:'p', v:pValue, c:'#f59e0b'}, {l:'K', key:'k', v:kValue, c:'#8b5cf6'} ].map(item => (
-               <div key={item.l} style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px' }} title={`Drag to adjust ${item.l}`}>
-                <span style={{ color: item.c, fontSize: '20px', fontWeight: 900, width: '50px' }}>{item.l}</span>
+               <div key={item.l} style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '16px' }} title={`Drag to adjust ${item.l}`}>
+                <span style={{ color: item.c, fontSize: '24px', fontWeight: 900, width: '50px' }}>{item.l}</span>
                  <div
                    ref={(el) => { npkTrackRefs.current[item.key] = el; }}
                    className={`npk-track interactive ${dragTarget === item.key ? 'dragging' : ''}`}
@@ -1391,7 +1411,7 @@ const AgricultureDashboard = () => {
                   <div className="npk-fill" style={{ width: `${item.v}%`, background: item.c }}></div>
                   <div className={`npk-dot ${dragTarget === item.key ? 'dragging' : ''}`} style={{ left: `${item.v}%`, background: item.c }}></div>
                  </div>
-                 <span style={{ color: '#334155', fontSize: '17px', fontWeight: 700, width: '36px', textAlign: 'right', lineHeight: 1 }}>{item.v}</span>
+                 <span style={{ color: '#334155', fontSize: '21px', fontWeight: 700, width: '36px', textAlign: 'right', lineHeight: 1 }}>{item.v}</span>
                </div>
             ))}
           </div>
@@ -1501,14 +1521,14 @@ const AgricultureDashboard = () => {
         }
 
         .loading-title {
-          font-size: 20px;
+          font-size: 24px;
           font-weight: 800;
           letter-spacing: 0.02em;
           color: #0f172a;
         }
 
         .loading-subtitle {
-          font-size: 15px;
+          font-size: 19px;
           font-weight: 600;
           color: #475569;
         }
@@ -1536,7 +1556,7 @@ const AgricultureDashboard = () => {
           justify-content: space-between;
           gap: 18px;
           margin-bottom: 14px;
-          padding: 14px 20px;
+          padding: 26px 20px;
           border-radius: 18px;
           background: linear-gradient(135deg, #0f766e 0%, #0d9488 48%, #14b8a6 100%);
           box-shadow: 0 12px 28px rgba(13, 148, 136, 0.22);
@@ -1719,20 +1739,20 @@ const AgricultureDashboard = () => {
           width: 100%;
         }
         .card { background: #ffffff; border: 1px solid #e2e8f0; border-radius: 14px; padding: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.07); min-height: 276px; height: 100%; min-width: 0; }
-        .ctitle { font-size: 25px; font-weight: 800; color: #0d9488; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
-        .field-title { font-size: 24px; }
-        .lbl { font-size: 20px; font-weight: 900; color: #94a3b8; text-align: center; margin-top: 4px; }
-        .val { font-size: 17px; font-weight: 700; color: #1e293b; text-align: center; line-height: 1.2; }
+        .ctitle { font-size: 30px; font-weight: 800; color: #0d9488; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+        .field-title { font-size: 28px; }
+        .lbl { font-size: 24px; font-weight: 900; color: #94a3b8; text-align: center; margin-top: 4px; }
+        .val { font-size: 22px; font-weight: 700; color: #1e293b; text-align: center; line-height: 1.2; }
         .col { display: flex; flex-direction: column; align-items: center; gap: 6px; min-width: 0; }
         .row { display: flex; align-items: center; gap: 9px; }
-        .badge { font-size: 12px; padding: 3px 10px; border-radius: 20px; font-weight: 600; display: inline-block; }
+        .badge { font-size: 16px; padding: 4px 12px; border-radius: 20px; font-weight: 600; display: inline-block; }
         .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
         .field-status-dot {
           width: 12px;
           height: 12px;
           animation: slowPulse 2.2s ease-in-out infinite;
         }
-        .stat-row { display: flex; align-items: center; justify-content: space-between; font-size: 13px; padding: 7px 0; border-bottom: 0.5px solid #f1f5f9; }
+        .stat-row { display: flex; align-items: center; justify-content: space-between; font-size: 17px; padding: 9px 0; border-bottom: 0.5px solid #f1f5f9; }
         
         @keyframes spin { to { transform: rotate(360deg); } }
         @keyframes flow { 0% { transform: translateX(-100%); } 100% { transform: translateX(250%); } }
@@ -1842,7 +1862,7 @@ const AgricultureDashboard = () => {
           display: flex;
           align-items: center;
           justify-content: center;
-          font-size: 22px;
+          font-size: 20px;
           font-weight: 800;
           color: #075985;
           text-shadow: 0 1px 4px rgba(255,255,255,0.92);
@@ -1851,8 +1871,8 @@ const AgricultureDashboard = () => {
         }
         .main-tank-meter .water-scale {
           height: 114px;
-          width: 34px;
-          font-size: 10px;
+          width: 54px;
+          font-size: 14px;
         }
         .main-tank-meter .scale-line {
           width: 12px;
@@ -1908,21 +1928,21 @@ const AgricultureDashboard = () => {
           display: flex;
           align-items: center;
           justify-content: center;
-          font-size: 10px;
+          font-size: 14px;
           font-weight: 700;
           color: #075985;
           text-shadow: 0 1px 4px rgba(255,255,255,0.92);
           z-index: 4;
         }
         .tank-outer .water-value {
-          font-size: 22px;
+          font-size: 26px;
         }
         .water-scale {
           position: relative;
           width: 28px;
           height: 80px;
           color: #475569;
-          font-size: 9px;
+          font-size: 13px;
           flex-shrink: 0;
         }
         .water-scale.compact {
@@ -1992,13 +2012,13 @@ const AgricultureDashboard = () => {
           gap: 12px;
         }
         .moisture-step-btn {
-          width: 28px;
-          height: 28px;
+          width: 35px;
+          height: 35px;
           border: none;
           border-radius: 999px;
           background: linear-gradient(180deg, #f8fbff 0%, #edf4ff 100%);
           color: #0f172a;
-          font-size: 30px;
+          font-size: 40px;
           font-weight: 800;
           line-height: 1;
           display: inline-flex;
@@ -2066,6 +2086,7 @@ const AgricultureDashboard = () => {
           top: 0;
         }
         .gauge-arc { fill: none; stroke-linecap: round; transition: stroke-dasharray 80ms linear; will-change: stroke-dasharray; }
+        .gauge-arc.dragging { transition: none; }
         .moisture-needle {
           transition: transform 90ms ease-out, filter 140ms ease-out;
           will-change: transform;
@@ -2196,7 +2217,7 @@ const AgricultureDashboard = () => {
           min-width: 0;
         }
         .gh-fan-label {
-          font-size: 18px;
+          font-size: 22px;
           font-weight: 800;
           transition: color 0.2s ease;
         }
@@ -2215,7 +2236,7 @@ const AgricultureDashboard = () => {
           color: #475569;
           cursor: pointer;
           line-height: 1;
-          font-size: 18px;
+          font-size: 22px;
           font-weight: 800;
           box-shadow: 0 1px 3px rgba(15, 23, 42, 0.08);
         }
@@ -2226,7 +2247,7 @@ const AgricultureDashboard = () => {
           min-width: 0;
         }
         .gh-reading-value {
-          font-size: 20px;
+          font-size: 24px;
           font-weight: 900;
           letter-spacing: 0.01em;
           white-space: nowrap;
@@ -2246,7 +2267,7 @@ const AgricultureDashboard = () => {
           margin-top: 4px;
         }
         .farmhouse-heading {
-          font-size: 25px;
+          font-size: 29px;
           font-weight: 800;
           color: #0d9488;
         }
@@ -2258,7 +2279,7 @@ const AgricultureDashboard = () => {
           gap: 3px;
         }
         .farmhouse-state {
-          font-size: 18px;
+          font-size: 22px;
           font-weight: 900;
           color: #16a34a;
           line-height: 1.1;
@@ -2388,6 +2409,7 @@ const AgricultureDashboard = () => {
             </button>
           </div>
         </div>
+            <br/>
         <div className="quad-grid">
           <div className="quad-section">
             <div className="overview-grid">
@@ -2471,9 +2493,9 @@ const AgricultureDashboard = () => {
               </div>
             </div>
             <div style={{ marginTop: '14px', borderTop: '0.5px solid #f1f5f9', paddingTop: '8px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
-              <div className="stat-row"><span style={{ fontSize: '20px', fontWeight: 700, color: '#64748b' }}>Flow rate</span><span style={{ fontSize: '22px', fontWeight: 500, color: '#0369a1' }}>{state.flowRate.toFixed(1)} L/min</span></div>
-              <div className="stat-row"><span style={{ fontSize: '20px', fontWeight: 700, color: '#64748b' }}>Fill time</span><span style={{ fontSize: '22px', fontWeight: 500, color: '#0369a1' }}>{MAIN_TANK_FILL_TIME_MINUTES} min</span></div>
-              <div className="stat-row" style={{ border: 'none' }}><span style={{ fontSize: '20px', fontWeight: 700, color: '#64748b' }}>Pump status</span><span className="badge" style={{ fontSize: '22px', background: state.pumping ? '#dbeafe' : '#f1f5f9', color: state.pumping ? '#1e40af' : '#475569' }}>{state.pumping ? 'Active' : 'Idle'}</span></div>
+              <div className="stat-row"><span style={{ fontSize: '24px', fontWeight: 700, color: '#64748b' }}>Flow rate</span><span style={{ fontSize: '26px', fontWeight: 500, color: '#0369a1' }}>{state.flowRate.toFixed(1)} L/min</span></div>
+              <div className="stat-row"><span style={{ fontSize: '24px', fontWeight: 700, color: '#64748b' }}>Fill time</span><span style={{ fontSize: '26px', fontWeight: 500, color: '#0369a1' }}>{MAIN_TANK_FILL_TIME_MINUTES} min</span></div>
+              <div className="stat-row" style={{ border: 'none' }}><span style={{ fontSize: '24px', fontWeight: 700, color: '#64748b' }}>Pump status</span><span className="badge" style={{ fontSize: '26px', background: state.pumping ? '#dbeafe' : '#f1f5f9', color: state.pumping ? '#1e40af' : '#475569' }}>{state.pumping ? 'Active' : 'Idle'}</span></div>
             </div>
           </div>
 
