@@ -71,23 +71,28 @@ const FIELD_CONFIGS = [
   },
 ];
 
-const SliderControl = ({ label, value, min, max, step, onChange, formatter, accentClass = '' }) => (
-  <div className="control-block">
-    <div className="control-row">
-      <span className="control-label">{label}</span>
-      <span className="control-value">{formatter(value)}</span>
+const SliderControl = ({ label, value, min, max, step, onChange, formatter, accentClass = '' }) => {
+  const handleSliderInput = (event) => onChange(event.target.value);
+
+  return (
+    <div className="control-block">
+      <div className="control-row">
+        <span className="control-label">{label}</span>
+        <span className="control-value">{formatter(value)}</span>
+      </div>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onInput={handleSliderInput}
+        onChange={handleSliderInput}
+        className={`range-slider ${accentClass}`.trim()}
+      />
     </div>
-    <input
-      type="range"
-      min={min}
-      max={max}
-      step={step}
-      value={value}
-      onChange={(event) => onChange(event.target.value)}
-      className={`range-slider ${accentClass}`.trim()}
-    />
-  </div>
-);
+  );
+};
 
 const ToggleControl = ({ label, checked, onChange, tone = 'teal' }) => (
   <label className="toggle-row">
@@ -297,6 +302,9 @@ const ControlPage = ({ controlValues = {}, setControlValues = () => {} }) => {
           outline: none;
           -webkit-appearance: none;
           cursor: pointer;
+          touch-action: pan-x;
+          -webkit-user-select: none;
+          user-select: none;
         }
 
         .range-slider::-webkit-slider-thumb {

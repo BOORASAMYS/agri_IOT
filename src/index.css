@@ -54,6 +54,21 @@ body {
   margin: 0;
 }
 
+html,
+body,
+#root,
+#root * {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+a,
+img {
+  -webkit-user-drag: none;
+}
+
 #root {
   width: 1126px;
   max-width: 100%;

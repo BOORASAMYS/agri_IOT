@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { Outlet, useLocation } from 'react-router-dom';
 
 const AppLayout = () => {
@@ -6,6 +6,20 @@ const AppLayout = () => {
   const isFullWidthPage = location.pathname === '/';
   const contentWrapperClass = `content-wrapper${isFullWidthPage ? ' dashboard-wrapper' : ''}`;
   const viewportClass = `app-viewport${isFullWidthPage ? ' dashboard-page' : ''}`;
+
+  useEffect(() => {
+    const preventDefault = (event) => event.preventDefault();
+
+    document.addEventListener('contextmenu', preventDefault);
+    document.addEventListener('selectstart', preventDefault);
+    document.addEventListener('dragstart', preventDefault);
+
+    return () => {
+      document.removeEventListener('contextmenu', preventDefault);
+      document.removeEventListener('selectstart', preventDefault);
+      document.removeEventListener('dragstart', preventDefault);
+    };
+  }, []);
 
   return (
     <div className={viewportClass}>

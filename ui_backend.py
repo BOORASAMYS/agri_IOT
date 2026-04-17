@@ -311,6 +311,8 @@ class ESPCommandWorker:
         self._session.mount("http://", adapter)
         self._last_request_at = 0.0
         self._status = ConnectionStatusTracker("ESP WORKER")
+        self._pending_syncs = set()
+        self._pending_lock = threading.Lock()
 
     def start(self):
         self._thread.start()
@@ -322,6 +324,17 @@ class ESPCommandWorker:
         self._session.close()
 
     def enqueue_sync(self, esp_num, source="control", wait=False, timeout=10.0):
+        if not wait:
+            with self._pending_lock:
+                if esp_num in self._pending_syncs:
+                    return {
+                        "queued": False,
+                        "skipped_duplicate": True,
+                        "esp": esp_num,
+                        "source": source,
+                    }
+                self._pending_syncs.add(esp_num)
+
         message = {
             "type": "sync",
             "esp_num": esp_num,
@@ -397,6 +410,9 @@ class ESPCommandWorker:
                     f"ESP{message['esp_num']} -> {ESP_DEVICES.get(message['esp_num'], 'unknown')}: {format_worker_error(error)}",
                 )
             finally:
+                if message["type"] == "sync" and message["event"] is None:
+                    with self._pending_lock:
+                        self._pending_syncs.discard(message["esp_num"])
                 if message["event"] is not None:
                     message["event"].set()
                 self._queue.task_done()
@@ -985,6 +1001,47 @@ def enqueue_field_relay_sync(field_key, source="control"):
     return plc_worker.enqueue(RELAY_COMMANDS[field_key][irrigation_on], source=source, wait=False)
 
 
+def send_all_plc_motors_off(source="shutdown"):
+    off_commands = (
+        ("main_tank", RELAY_COMMANDS["main_tank"][False]),
+        ("f1", RELAY_COMMANDS["f1"][False]),
+        ("f2", RELAY_COMMANDS["f2"][False]),
+        ("f3", RELAY_COMMANDS["f3"][False]),
+    )
+    results = []
+    errors = []
+
+    with STATE_LOCK:
+        CURRENT["state"]["pumping"] = False
+        CURRENT["state"]["mainTankManualOverride"] = False
+        for field_key in ("f1", "f2", "f3"):
+            CURRENT["state"][field_key]["irrigation"] = False
+
+    with MAIN_TANK_RELAY_COMMAND_LOCK:
+        global MAIN_TANK_LAST_REQUESTED_STATE
+        MAIN_TANK_LAST_REQUESTED_STATE = False
+
+    for relay_name, command in off_commands:
+        try:
+            result = plc_worker.enqueue(command, source=source, wait=True)
+            results.append({
+                "relay": relay_name,
+                "command": command,
+                "result": result,
+            })
+        except Exception as error:
+            errors.append({
+                "relay": relay_name,
+                "command": command,
+                "error": str(error),
+            })
+
+    return {
+        "results": results,
+        "errors": errors,
+    }
+
+
 def enqueue_esp_sync(esp_num, source="control"):
     return esp_worker.enqueue_sync(esp_num, source=source, wait=False)
 
@@ -1217,7 +1274,23 @@ class UIBackendHandler(Handler):
                 self.send_json({"error": shutdown_error}, status=503)
                 return
 
-            self.send_json({"ok": True, "message": "Raspberry Pi shutdown started."})
+            relay_report = send_all_plc_motors_off(source="shutdown-precheck")
+            if relay_report["errors"]:
+                self.send_json(
+                    {
+                        "error": "Failed to send OFF to all PLC motors before shutdown.",
+                        "details": relay_report["errors"],
+                    },
+                    status=502,
+                )
+                return
+
+            self.send_json(
+                {
+                    "ok": True,
+                    "message": "All PLC motors turned OFF. Raspberry Pi shutdown started.",
+                }
+            )
             threading.Thread(target=perform_system_shutdown, args=(self.server, shutdown_command), daemon=True).start()
             return
 
