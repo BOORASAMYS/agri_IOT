@@ -94,6 +94,7 @@ ESP_RETRY_BACKOFF_SECONDS = 0.75
 ESP_INTER_REQUEST_DELAY_SECONDS = 0.2
 PLC_COMMAND_QUEUE_TIMEOUT_SECONDS = 1.0
 ESP_COMMAND_QUEUE_TIMEOUT_SECONDS = 1.0
+SHUTDOWN_DELAY_SECONDS = 5.0
 MAIN_TANK_SENSOR_URL = os.getenv("MAIN_TANK_SENSOR_URL", "http://192.168.0.4/tank")
 MAIN_TANK_SENSOR_TIMEOUT_SECONDS = float(os.getenv("MAIN_TANK_SENSOR_TIMEOUT", "0.8"))
 MAIN_TANK_POLL_INTERVAL_SECONDS = float(os.getenv("MAIN_TANK_POLL_INTERVAL_SECONDS", "0.5"))
@@ -1549,7 +1550,7 @@ def perform_system_shutdown(server, shutdown_command):
 
     try:
         shell_command = (
-            "sleep 1; "
+            f"sleep {SHUTDOWN_DELAY_SECONDS:g}; "
             "sudo -n /usr/sbin/shutdown -h now >/tmp/agri-shutdown.log 2>&1; "
             f"kill -TERM {backend_pid} >/dev/null 2>&1 || true"
         )

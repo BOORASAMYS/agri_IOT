@@ -18,7 +18,7 @@ STATE_FILE = os.path.join(os.path.dirname(__file__), "esp32_state.json")
 STATE_FILE_TMP = f"{STATE_FILE}.tmp"
 DEFAULT_DEVICE_IP = "192.168.0.20"
 IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD = 30.0
-IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD = 60.0
+IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD = 100.0
 IRRIGATION_PH_TARGET = 7.0
 IRRIGATION_PH_TOLERANCE = 0.05
 IRRIGATION_LOW_PH_THRESHOLD = 4.0
@@ -203,6 +203,10 @@ def is_ph_out_of_range(ph):
 def resolve_auto_irrigation(field_key, field, currently_irrigating=False):
     moisture = number_from_value(field.get("moisture"), IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD)
     ph = number_from_value(field.get("ph"), IRRIGATION_PH_TARGET)
+
+    if moisture >= IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD:
+        return False, None
+
     has_unsafe_ph_override_at_high_moisture = (
         field_key in {"f1", "f2"}
         and moisture >= IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD
@@ -211,8 +215,6 @@ def resolve_auto_irrigation(field_key, field, currently_irrigating=False):
 
     if has_unsafe_ph_override_at_high_moisture:
         return True, "ph"
-    if moisture >= IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD:
-        return False, None
     if moisture < IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD:
         return True, "moisture"
     return bool_from_value(currently_irrigating), "moisture" if bool_from_value(currently_irrigating) else None
@@ -673,6 +675,16 @@ def update_current(patch, connected=None, last_error=None, field_metadata=None):
             field_patch = state_patch.get(field_key, {}) if isinstance(state_patch.get(field_key), dict) else {}
             metadata = (field_metadata or {}).get(field_key, {})
             sensor_update_present = any(key in field_patch for key in ("moisture", "wl", "ph", "n", "p", "k"))
+            full_moisture_cutoff = number_from_value(field.get("moisture"), 0.0) >= IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD
+
+            if full_moisture_cutoff:
+                MANUAL_IRRIGATION_OVERRIDES[field_key] = False
+                LOW_MOISTURE_LATCHES[field_key] = False
+                PH_CONTROL_LATCHES[field_key] = False
+                field["irrigation"] = False
+                field.update(get_ph_chemical_state(field.get("ph")))
+                clear_irrigation_run(field_key)
+                continue
 
             if "moisture" in field_patch or "wl" in field_patch:
                 MANUAL_IRRIGATION_OVERRIDES[field_key] = None
@@ -747,8 +759,13 @@ def simulation_loop():
                     continue
 
                 if field.get("irrigation"):
-                    if field.get("moisture", 0) < 100.0:
+                    if field.get("moisture", 0) < IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD:
                         field["moisture"] = round(min(100.0, field.get("moisture", 0) + 1.0), 1)
+                        dirty = True
+                    else:
+                        field["irrigation"] = False
+                        MANUAL_IRRIGATION_OVERRIDES[field_key] = False
+                        clear_irrigation_run(field_key)
                         dirty = True
 
                 else:
@@ -760,6 +777,18 @@ def simulation_loop():
                 if field.get("wl") != linked_water_level:
                     field["wl"] = linked_water_level
                     dirty = True
+
+                if field.get("moisture", 0.0) >= IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD:
+                    if field.get("irrigation"):
+                        field["irrigation"] = False
+                        MANUAL_IRRIGATION_OVERRIDES[field_key] = False
+                        dirty = True
+                    clear_irrigation_run(field_key)
+                    LOW_MOISTURE_LATCHES[field_key] = False
+                    PH_CONTROL_LATCHES[field_key] = False
+                    field.update(get_ph_chemical_state(field.get("ph")))
+                    continue
+
                 desired_auto_reason = get_irrigation_reason(field_key, field)
                 manual_override = MANUAL_IRRIGATION_OVERRIDES[field_key]
                 manual_requested = IRRIGATION_RUNS[field_key]["reason"] == "manual" and bool_from_value(field.get("irrigation"))

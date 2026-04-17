@@ -24,7 +24,7 @@ const MAIN_TANK_DRAIN_INTERVAL_MS = 1200;
 const AUTOMATION_TICK_MS = 1200;
 const STATUS_REFRESH_INTERVAL_MS = 500;
 const IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD = 30;
-const IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD = 60;
+const IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD = 100;
 const MAIN_TANK_HIGH_FILL_PERCENT_PER_TICK = 2.0;
 const MAIN_TANK_LOW_FILL_PERCENT_PER_TICK = 2.0;
 const PH_TARGET = 7;
@@ -110,6 +110,10 @@ const canFieldStartIrrigation = (fieldKey, field) => shouldFieldIrrigate(fieldKe
 const shouldFieldIrrigate = (fieldKey, field, wasIrrigating = false) => {
   const moisture = Number(field?.moisture ?? 0);
   const ph = Number(field?.ph ?? PH_TARGET);
+  if (moisture >= IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD) {
+    return false;
+  }
+
   const hasUnsafePhOverrideAtHighLevel = (
     (fieldKey === 'f1' || fieldKey === 'f2')
     && moisture >= IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD
