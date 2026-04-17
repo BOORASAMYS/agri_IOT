@@ -12,7 +12,10 @@ from urllib.request import Request, urlopen
 HOST = "0.0.0.0"
 PORT = 8000
 REQUEST_TIMEOUT = 4
+STATUS_REQUEST_TIMEOUT = 1.5
+STATUS_CACHE_TTL_SECONDS = 0.4
 STATE_FILE = os.path.join(os.path.dirname(__file__), "esp32_state.json")
+STATE_FILE_TMP = f"{STATE_FILE}.tmp"
 DEFAULT_DEVICE_IP = "192.168.0.20"
 IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD = 30.0
 IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD = 60.0
@@ -105,6 +108,11 @@ IRRIGATION_RUNS = {
     "f2": {"reason": None, "start_time": None, "start_moisture": None},
     "f3": {"reason": None, "start_time": None, "start_moisture": None},
 }
+FIELD_KEYS = ("f1", "f2", "f3")
+LAST_SAVED_STATE = None
+LAST_STATUS_SYNC_AT = 0.0
+STATUS_SYNC_IN_PROGRESS = False
+LAST_SUCCESSFUL_STATUS_PATH = "/status"
 
 
 def deep_merge(base, patch):
@@ -297,7 +305,7 @@ def apply_greenhouse_rules(state):
 
 
 def initialize_irrigation_runtime(state):
-    for field_key in ("f1", "f2", "f3"):
+    for field_key in FIELD_KEYS:
         field = state.get("state", {}).get(field_key)
         if not isinstance(field, dict):
             continue
@@ -321,10 +329,23 @@ CURRENT = initialize_irrigation_runtime(CURRENT)
 CURRENT = apply_greenhouse_rules(CURRENT)
 
 
-def save_state():
+def serialize_state():
     CURRENT.pop("lastUpdated", None)
-    with open(STATE_FILE, "w", encoding="utf-8") as file:
-        json.dump(CURRENT, file, indent=2)
+    return json.dumps(CURRENT, ensure_ascii=False, separators=(",", ":"))
+
+
+def save_state(force=False):
+    global LAST_SAVED_STATE
+
+    serialized_state = serialize_state()
+    if not force and serialized_state == LAST_SAVED_STATE and os.path.exists(STATE_FILE):
+        return False
+
+    with open(STATE_FILE_TMP, "w", encoding="utf-8") as file:
+        file.write(serialized_state)
+    os.replace(STATE_FILE_TMP, STATE_FILE)
+    LAST_SAVED_STATE = serialized_state
+    return True
 
 
 def reset_state_for_shutdown():
@@ -335,7 +356,7 @@ def reset_state_for_shutdown():
         state["mainTankManualOverride"] = False
         state["flowRate"] = 0.0
 
-        for field_key in ("f1", "f2", "f3"):
+        for field_key in FIELD_KEYS:
             field = state.get(field_key)
             if not isinstance(field, dict):
                 continue
@@ -381,7 +402,7 @@ def get_target_ip(override_ip=None):
     return DEFAULT_DEVICE_IP
 
 
-def http_json(url, method="GET", body=None):
+def http_json(url, method="GET", body=None, timeout=REQUEST_TIMEOUT):
     payload = None
     headers = {}
     if body is not None:
@@ -389,7 +410,7 @@ def http_json(url, method="GET", body=None):
         headers["Content-Type"] = "application/json"
 
     request = Request(url, data=payload, method=method, headers=headers)
-    with urlopen(request, timeout=REQUEST_TIMEOUT) as response:
+    with urlopen(request, timeout=timeout) as response:
         raw = response.read().decode("utf-8", errors="replace")
         content_type = response.headers.get("Content-Type", "")
         if "application/json" in content_type:
@@ -401,9 +422,9 @@ def http_json(url, method="GET", body=None):
             return {"raw": raw}
 
 
-def http_text(url):
+def http_text(url, timeout=REQUEST_TIMEOUT):
     request = Request(url, method="GET")
-    with urlopen(request, timeout=REQUEST_TIMEOUT) as response:
+    with urlopen(request, timeout=timeout) as response:
         return response.read().decode("utf-8", errors="replace")
 
 
@@ -451,7 +472,7 @@ def apply_status_payload(payload):
     if gh_patch:
         state_patch["gh"] = gh_patch
 
-    for field_key in ("f1", "f2", "f3"):
+    for field_key in FIELD_KEYS:
         incoming = payload.get(field_key)
         if not isinstance(incoming, dict):
             continue
@@ -472,12 +493,23 @@ def apply_status_payload(payload):
 
 
 def fetch_device_status(ip_address):
+    global LAST_SUCCESSFUL_STATUS_PATH
+
     errors = []
-    for path in ("/status", "/data", "/"):
+    status_paths = [LAST_SUCCESSFUL_STATUS_PATH]
+    for fallback_path in ("/status", "/data", "/"):
+        if fallback_path not in status_paths:
+            status_paths.append(fallback_path)
+
+    for path in status_paths:
         try:
-            payload = http_json(f"http://{ip_address}{path}")
+            payload = http_json(
+                f"http://{ip_address}{path}",
+                timeout=STATUS_REQUEST_TIMEOUT,
+            )
             patch = apply_status_payload(payload)
             if patch:
+                LAST_SUCCESSFUL_STATUS_PATH = path
                 return patch
         except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as error:
             errors.append(f"{path}: {error}")
@@ -485,6 +517,41 @@ def fetch_device_status(ip_address):
             errors.append(f"{path}: {error}")
 
     raise RuntimeError("; ".join(errors) if errors else "Unable to read ESP32 status")
+
+
+def refresh_device_status_now(ip_address):
+    patch = fetch_device_status(ip_address)
+    update_current(patch, connected=True, last_error="")
+
+
+def schedule_status_refresh(ip_address, force=False):
+    global LAST_STATUS_SYNC_AT, STATUS_SYNC_IN_PROGRESS
+
+    if not ip_address:
+        return False
+
+    now = time.time()
+    with STATE_LOCK:
+        if STATUS_SYNC_IN_PROGRESS:
+            return False
+        if not force and now - LAST_STATUS_SYNC_AT < STATUS_CACHE_TTL_SECONDS:
+            return False
+
+        STATUS_SYNC_IN_PROGRESS = True
+        LAST_STATUS_SYNC_AT = now
+
+    def worker():
+        global STATUS_SYNC_IN_PROGRESS
+        try:
+            refresh_device_status_now(ip_address)
+        except Exception as error:
+            update_current({}, connected=False, last_error=str(error))
+        finally:
+            with STATE_LOCK:
+                STATUS_SYNC_IN_PROGRESS = False
+
+    threading.Thread(target=worker, daemon=True).start()
+    return True
 
 
 def set_pump_state(ip_address, pump_on, field_key="f1"):
@@ -593,7 +660,7 @@ def update_current(patch, connected=None, last_error=None, field_metadata=None):
         if "fanOn" in greenhouse_patch:
             merged["state"]["gh"]["fanOn"] = bool_from_value(greenhouse_patch.get("fanOn"))
 
-        for field_key in ("f1", "f2", "f3"):
+        for field_key in FIELD_KEYS:
             field = merged["state"][field_key]
             field_patch = state_patch.get(field_key, {}) if isinstance(state_patch.get(field_key), dict) else {}
             metadata = (field_metadata or {}).get(field_key, {})
@@ -666,7 +733,7 @@ def simulation_loop():
                         dirty = True
                 apply_greenhouse_rules(CURRENT)
 
-            for field_key in ("f1", "f2", "f3"):
+            for field_key in FIELD_KEYS:
                 field = CURRENT.get("state", {}).get(field_key)
                 if not field:
                     continue
@@ -747,18 +814,12 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/status":
             with STATE_LOCK:
                 ip_address = CURRENT["deviceIp"]
+                snapshot = deepcopy(CURRENT)
 
-            if not ip_address:
-                self.send_json(CURRENT)
-                return
+            if ip_address:
+                schedule_status_refresh(ip_address)
 
-            try:
-                patch = fetch_device_status(ip_address)
-                update_current(patch, connected=True, last_error="")
-            except Exception as error:
-                update_current({}, connected=False, last_error=str(error))
-
-            self.send_json(CURRENT)
+            self.send_json(snapshot)
             return
 
         if parsed.path == "/api/health":
