@@ -621,6 +621,11 @@ def normalize_field_body(field_key, body):
     manual_irrigation_control = bool_from_value(incoming.get("manualIrrigationControl"))
     sensor_update_present = bool(field_patch)
 
+    incoming_status = str(incoming.get("status", "")).strip().lower()
+    if incoming_status in {"drain", "irrigation"}:
+        field_patch["drain"] = incoming_status == "drain"
+        device_payload["status"] = incoming_status
+
     for key in ("irrigation", "drain", "acid", "base"):
         if key not in incoming:
             continue
@@ -631,6 +636,9 @@ def normalize_field_body(field_key, body):
         device_payload[key] = value
         if key == "irrigation" and manual_irrigation_control:
             metadata["manual_irrigation_control"] = True
+
+    if "drain" in field_patch:
+        device_payload["status"] = "drain" if field_patch["drain"] else "irrigation"
 
     return field_patch, device_payload, metadata
 

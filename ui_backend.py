@@ -416,9 +416,10 @@ class ESPCommandWorker:
                     url = f"http://{target_ip}/set?temp={payload['temp']}&humid={payload['humid']}&fan={fan}"
                 else:
                     pump = str(payload["pump"]).lower()
+                    status = str(payload.get("status", "irrigation")).lower()
                     url = (
                         f"http://{target_ip}/set?level={payload['level']}&pump={pump}"
-                        f"&ph={payload['ph']}&moisture={payload['moisture']}"
+                        f"&ph={payload['ph']}&moisture={payload['moisture']}&status={status}"
                     )
 
                 response = self._session.get(url, timeout=ESP_REQUEST_TIMEOUT)
@@ -864,6 +865,7 @@ def get_esp_payload_from_state(esp_num):
             "pump": "on" if field["irrigation"] else "off",
             "ph": round(field["ph"], 2),
             "moisture": round(field["moisture"], 1),
+            "status": "drain" if field["drain"] else "irrigation",
         }
 
     if esp_num == 2:
@@ -873,6 +875,7 @@ def get_esp_payload_from_state(esp_num):
             "pump": "on" if field["irrigation"] else "off",
             "ph": round(field["ph"], 2),
             "moisture": round(field["moisture"], 1),
+            "status": "drain" if field["drain"] else "irrigation",
         }
 
     if esp_num == 3:
@@ -882,6 +885,7 @@ def get_esp_payload_from_state(esp_num):
             "pump": "on" if field["irrigation"] else "off",
             "ph": round(field["ph"], 2),
             "moisture": round(field["moisture"], 1),
+            "status": "drain" if field["drain"] else "irrigation",
         }
 
     if esp_num == 4:
@@ -913,6 +917,7 @@ def build_manual_esp_payload(esp_num, level, pump, ph, moisture):
         "pump": pump_value,
         "ph": float(ph),
         "moisture": float(moisture),
+        "status": "irrigation",
     }
 
 
@@ -1358,11 +1363,7 @@ class UIBackendHandler(Handler):
                 "ok": True,
                 "field": field_key,
                 "saved": True,
-                "esp": {
-                    "number": esp_num,
-                    "ip": ESP_DEVICES[esp_num],
-                    "queued": False,
-                },
+                "esp": [],
                 "dashboard": CURRENT,
             }
 
@@ -1378,13 +1379,29 @@ class UIBackendHandler(Handler):
                 main_warning = f"Main tank relay sync failed: {error}"
                 response_payload["relayWarning"] = f"{existing_warning}; {main_warning}" if existing_warning else main_warning
 
-            try:
-                payload = get_esp_payload_from_state(esp_num)
-                enqueue_esp_sync(esp_num, source="field-api")
-                response_payload["esp"]["queued"] = True
-                response_payload["esp"]["payload"] = payload
-            except Exception as error:
-                response_payload["warning"] = f"Saved locally, but ESP sync failed: {error}"
+            esp_errors = []
+            for sync_field_key, sync_esp_num in self.FIELD_TO_ESP.items():
+                esp_entry = {
+                    "field": sync_field_key,
+                    "number": sync_esp_num,
+                    "ip": ESP_DEVICES[sync_esp_num],
+                    "queued": False,
+                }
+                try:
+                    payload = get_esp_payload_from_state(sync_esp_num)
+                    enqueue_esp_sync(sync_esp_num, source="field-api")
+                    esp_entry["queued"] = True
+                    esp_entry["payload"] = payload
+                except Exception as error:
+                    esp_entry["error"] = str(error)
+                    esp_errors.append(f"{sync_field_key}: {error}")
+
+                response_payload["esp"].append(esp_entry)
+
+            if esp_errors:
+                response_payload["warning"] = (
+                    "Saved locally, but ESP sync failed for: " + "; ".join(esp_errors)
+                )
 
             self.send_json(response_payload)
             return

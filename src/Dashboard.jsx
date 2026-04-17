@@ -583,6 +583,7 @@ const AgricultureDashboard = () => {
       irrigation: field.irrigation,
       manualIrrigationControl: manualIrrigationOverrideRef.current[fieldKey] !== undefined,
       drain: field.drain,
+      status: field.drain ? 'drain' : 'irrigation',
       acid: field.acid,
       base: field.base,
     };
