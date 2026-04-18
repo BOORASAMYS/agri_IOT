@@ -106,6 +106,32 @@ const createInitialDashboardState = () => applyMainTankRules({
 const clampValue = (value, min, max) => Math.max(min, Math.min(max, value));
 const moistureToWaterLevel = (moisture) => Number(clampValue((moisture / 100) * 30, 0, 30).toFixed(1));
 const waterLevelToMoisture = (waterLevel) => Number(clampValue((waterLevel / 30) * 100, 0, 100).toFixed(1));
+const moistureToPh = (moisture) => Number(clampValue(1 + (Number(moisture ?? 0) / 10), 0, 14).toFixed(2));
+const phToMoisture = (ph) => Number(clampValue((Number(ph ?? PH_TARGET) - 1) * 10, 0, 100).toFixed(1));
+const normalizeLinkedFieldValues = (patch = {}) => {
+  const nextPatch = { ...patch };
+  const hasMoisture = Object.prototype.hasOwnProperty.call(nextPatch, 'moisture');
+  const hasWaterLevel = Object.prototype.hasOwnProperty.call(nextPatch, 'wl');
+  const hasPh = Object.prototype.hasOwnProperty.call(nextPatch, 'ph');
+
+  if (hasWaterLevel && !hasMoisture) {
+    nextPatch.moisture = waterLevelToMoisture(nextPatch.wl);
+  } else if (hasPh && !hasMoisture) {
+    nextPatch.moisture = phToMoisture(nextPatch.ph);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(nextPatch, 'moisture')) {
+    const normalizedMoisture = Number(clampValue(nextPatch.moisture, 0, 100).toFixed(1));
+    nextPatch.moisture = normalizedMoisture;
+    nextPatch.wl = moistureToWaterLevel(normalizedMoisture);
+    nextPatch.ph = moistureToPh(normalizedMoisture);
+    Object.assign(nextPatch, getPhChemicalState(nextPatch.ph));
+  } else if (hasPh) {
+    Object.assign(nextPatch, getPhChemicalState(nextPatch.ph));
+  }
+
+  return nextPatch;
+};
 const canFieldStartIrrigation = (fieldKey, field) => shouldFieldIrrigate(fieldKey, field, false);
 const shouldFieldIrrigate = (fieldKey, field, wasIrrigating = false) => {
   const moisture = Number(field?.moisture ?? 0);
@@ -1105,6 +1131,7 @@ const AgricultureDashboard = () => {
             || Object.prototype.hasOwnProperty.call(patch, 'ph')
           ) {
             nextManualOverride = undefined;
+            Object.assign(nextField, normalizeLinkedFieldValues(nextField));
           }
 
           if (
@@ -1114,7 +1141,6 @@ const AgricultureDashboard = () => {
             nextField.irrigation = shouldFieldIrrigate(fieldKey, nextField, Boolean(prev[fieldKey]?.irrigation));
           }
           if (Object.prototype.hasOwnProperty.call(patch, 'ph')) {
-            Object.assign(nextField, getPhChemicalState(nextField.ph ?? PH_TARGET));
             nextField.irrigation = shouldFieldIrrigate(fieldKey, nextField, Boolean(prev[fieldKey]?.irrigation));
           }
 
@@ -1164,10 +1190,10 @@ const AgricultureDashboard = () => {
     };
     const setMoistureDisplayValue = (next) => {
       const normalized = Number(clamp(next, 0, 100).toFixed(1));
-      const linkedWaterLevel = moistureToWaterLevel(normalized);
+      const linkedValues = normalizeLinkedFieldValues({ moisture: normalized });
       moistureDisplayRef.current = normalized;
-      setLivePatch({ moisture: normalized, wl: linkedWaterLevel });
-      scheduleFieldPatch({ moisture: normalized, wl: linkedWaterLevel });
+      setLivePatch(linkedValues);
+      scheduleFieldPatch(linkedValues);
     };
     const triggerMoistureButtonAction = useCallback((direction) => {
       activeEditFieldsRef.current[fieldKey] = true;
@@ -1175,7 +1201,7 @@ const AgricultureDashboard = () => {
       const step = 1; // 1% per step
       const nextMoisture = currentMoisture + (direction * step);
       const normalized = Number(clamp(nextMoisture, 0, 100).toFixed(1));
-      const linkedWaterLevel = moistureToWaterLevel(normalized);
+      const linkedValues = normalizeLinkedFieldValues({ moisture: normalized });
       
       // Update display ref immediately
       moistureDisplayRef.current = normalized;
@@ -1183,21 +1209,19 @@ const AgricultureDashboard = () => {
       // Update local field state for immediate visual feedback
       setLiveField((prev) => ({ 
         ...(prev ?? {}), 
-        moisture: normalized, 
-        wl: linkedWaterLevel,
+        ...linkedValues,
         // Preserve other values
-        ph: prev?.ph ?? data.ph,
         n: prev?.n ?? data.n,
         p: prev?.p ?? data.p,
         k: prev?.k ?? data.k,
         irrigation: prev?.irrigation ?? data.irrigation,
         drain: prev?.drain ?? data.drain,
-        acid: prev?.acid ?? data.acid,
-        base: prev?.base ?? data.base
+        acid: linkedValues.acid,
+        base: linkedValues.base
       }));
       
       // Schedule backend patch at normal throttle rate (30ms batching)
-      scheduleFieldPatch({ moisture: normalized, wl: linkedWaterLevel });
+      scheduleFieldPatch(linkedValues);
     }, [fieldKey, moistureValue, data]);
     const releaseMoistureButtonAction = (direction) => {
       if (moistureAdjustReleaseCleanupRef.current) {
@@ -1350,19 +1374,22 @@ const AgricultureDashboard = () => {
       const rect = phTrackRef.current.getBoundingClientRect();
       const pct = clamp((clientX - rect.left) / rect.width, 0, 1);
       const next = Number((pct * 14).toFixed(2));
-      setLivePatch({ ph: next, ...getPhChemicalState(next) });
-      scheduleFieldPatch({ ph: next });
+      const linkedValues = normalizeLinkedFieldValues({ ph: next });
+      moistureTargetRef.current = linkedValues.moisture;
+      moistureDisplayRef.current = linkedValues.moisture;
+      setLivePatch(linkedValues);
+      scheduleFieldPatch(linkedValues);
     };
     const setWaterLevelFromPointer = (clientY) => {
       if (!waterLevelRef.current) return;
       const rect = waterLevelRef.current.getBoundingClientRect();
       const pct = clamp((rect.bottom - clientY) / rect.height, 0, 1);
       const next = Number((pct * 30).toFixed(1));
-      const linkedMoisture = waterLevelToMoisture(next);
-      moistureTargetRef.current = linkedMoisture;
-      moistureDisplayRef.current = linkedMoisture;
-      setLivePatch({ wl: next, moisture: linkedMoisture });
-      scheduleFieldPatch({ wl: next, moisture: linkedMoisture });
+      const linkedValues = normalizeLinkedFieldValues({ wl: next });
+      moistureTargetRef.current = linkedValues.moisture;
+      moistureDisplayRef.current = linkedValues.moisture;
+      setLivePatch(linkedValues);
+      scheduleFieldPatch(linkedValues);
     };
     const setNpkFromPointer = (key, clientX) => {
       const track = npkTrackRefs.current[key];

@@ -182,6 +182,28 @@ def ph_to_moisture(ph):
     return round(max(0.0, min(100.0, (normalized_ph - 1.0) * 10.0)), 1)
 
 
+def normalize_linked_field_values(field_patch):
+    normalized_patch = dict(field_patch or {})
+    moisture_present = "moisture" in normalized_patch
+    water_level_present = "wl" in normalized_patch
+    ph_present = "ph" in normalized_patch
+
+    if water_level_present and not moisture_present:
+        normalized_patch["moisture"] = water_level_to_moisture(normalized_patch["wl"])
+        moisture_present = True
+
+    if ph_present and not moisture_present:
+        normalized_patch["moisture"] = ph_to_moisture(normalized_patch["ph"])
+        moisture_present = True
+
+    if moisture_present:
+        normalized_patch["moisture"] = max(0.0, min(100.0, number_from_value(normalized_patch["moisture"], 0.0)))
+        normalized_patch["wl"] = moisture_to_water_level(normalized_patch["moisture"])
+        normalized_patch["ph"] = moisture_to_ph(normalized_patch["moisture"])
+
+    return normalized_patch
+
+
 def get_ph_chemical_state(ph):
     normalized_ph = number_from_value(ph, IRRIGATION_PH_TARGET)
     return {
@@ -483,6 +505,8 @@ def apply_status_payload(payload):
         for key in ("moisture", "ph", "wl", "n", "p", "k"):
             if key in incoming:
                 field_patch[key] = number_from_value(incoming[key], CURRENT["state"][field_key][key])
+        if any(key in field_patch for key in ("moisture", "ph", "wl")):
+            field_patch = normalize_linked_field_values(field_patch)
         for key in ("irrigation", "drain", "acid", "base"):
             if key in incoming:
                 field_patch[key] = bool_from_value(incoming[key])
@@ -612,14 +636,11 @@ def normalize_field_body(field_key, body):
         if target_key == "wl":
             water_level_updated = True
 
-    if moisture_updated and not water_level_updated:
-        linked_water_level = moisture_to_water_level(field_patch["moisture"])
-        field_patch["wl"] = linked_water_level
-        device_payload["wl"] = linked_water_level
-    elif water_level_updated and not moisture_updated:
-        linked_moisture = water_level_to_moisture(field_patch["wl"])
-        field_patch["moisture"] = linked_moisture
-        device_payload["moisture"] = linked_moisture
+    if moisture_updated or water_level_updated or "ph" in field_patch:
+        field_patch = normalize_linked_field_values(field_patch)
+        for linked_key in ("moisture", "wl", "ph"):
+            if linked_key in field_patch:
+                device_payload[linked_key] = field_patch[linked_key]
     manual_irrigation_control = bool_from_value(incoming.get("manualIrrigationControl"))
     sensor_update_present = bool(field_patch)
 
@@ -675,6 +696,13 @@ def update_current(patch, connected=None, last_error=None, field_metadata=None):
             field_patch = state_patch.get(field_key, {}) if isinstance(state_patch.get(field_key), dict) else {}
             metadata = (field_metadata or {}).get(field_key, {})
             sensor_update_present = any(key in field_patch for key in ("moisture", "wl", "ph", "n", "p", "k"))
+
+            if sensor_update_present:
+                normalized_field_patch = normalize_linked_field_values(field_patch)
+                if normalized_field_patch != field_patch:
+                    field.update(normalized_field_patch)
+                    field_patch = normalized_field_patch
+
             full_moisture_cutoff = number_from_value(field.get("moisture"), 0.0) >= IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD
 
             if full_moisture_cutoff:
@@ -776,6 +804,11 @@ def simulation_loop():
                 linked_water_level = moisture_to_water_level(field.get("moisture", 0.0))
                 if field.get("wl") != linked_water_level:
                     field["wl"] = linked_water_level
+                    dirty = True
+
+                linked_ph = moisture_to_ph(field.get("moisture", 0.0))
+                if field.get("ph") != linked_ph:
+                    field["ph"] = linked_ph
                     dirty = True
 
                 if field.get("moisture", 0.0) >= IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD:
