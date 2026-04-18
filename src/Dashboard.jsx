@@ -583,6 +583,57 @@ const AgricultureDashboard = () => {
   }, []);
 
   useEffect(() => {
+    if (!import.meta.env.DEV) return undefined;
+
+    let unmounted = false;
+
+    const requestFullscreen = async () => {
+      if (unmounted || document.fullscreenElement) return;
+
+      const root = document.documentElement;
+      const request = root.requestFullscreen
+        || root.webkitRequestFullscreen
+        || root.msRequestFullscreen;
+
+      if (!request) return;
+
+      try {
+        const result = request.call(root);
+        if (result && typeof result.then === 'function') {
+          await result;
+        }
+      } catch (error) {
+        // Browsers can block fullscreen until user interaction.
+      }
+    };
+
+    const onFirstInteraction = () => {
+      requestFullscreen();
+      detachInteractionListeners();
+    };
+
+    const detachInteractionListeners = () => {
+      window.removeEventListener('pointerdown', onFirstInteraction);
+      window.removeEventListener('keydown', onFirstInteraction);
+      window.removeEventListener('touchstart', onFirstInteraction);
+    };
+
+    const startupTimerId = window.setTimeout(() => {
+      requestFullscreen();
+    }, 350);
+
+    window.addEventListener('pointerdown', onFirstInteraction, { once: true });
+    window.addEventListener('keydown', onFirstInteraction, { once: true });
+    window.addEventListener('touchstart', onFirstInteraction, { once: true });
+
+    return () => {
+      unmounted = true;
+      window.clearTimeout(startupTimerId);
+      detachInteractionListeners();
+    };
+  }, []);
+
+  useEffect(() => {
     const timerId = window.setTimeout(() => {
       setIsLoadingScreenVisible(false);
     }, 10000);
