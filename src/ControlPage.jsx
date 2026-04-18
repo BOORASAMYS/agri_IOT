@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 
 const PH_TARGET = 7;
 const getPhChemicalState = (ph) => ({
@@ -71,6 +71,14 @@ const FIELD_CONFIGS = [
   },
 ];
 
+const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+
+const moistureColor = (value) => {
+  if (value < 30) return '#ef4444';
+  if (value < 60) return '#f59e0b';
+  return '#10b981';
+};
+
 const SliderControl = ({ label, value, min, max, step, onChange, formatter, accentClass = '' }) => {
   const handleSliderInput = (event) => onChange(event.target.value);
 
@@ -90,6 +98,110 @@ const SliderControl = ({ label, value, min, max, step, onChange, formatter, acce
         onChange={handleSliderInput}
         className={`range-slider ${accentClass}`.trim()}
       />
+    </div>
+  );
+};
+
+const MoistureGaugeControl = ({ label, value, onChange, formatter }) => {
+  const svgRef = useRef(null);
+  const draggingRef = useRef(false);
+  const [isDragging, setIsDragging] = useState(false);
+
+  const syncFromPointer = (clientX, clientY) => {
+    if (!svgRef.current) return;
+    const rect = svgRef.current.getBoundingClientRect();
+    const x = ((clientX - rect.left) / rect.width) * 164;
+    const y = ((clientY - rect.top) / rect.height) * 112;
+    const rawAngle = Math.atan2(x - 78, 72 - y) * (180 / Math.PI);
+    const clampedAngle = clamp(rawAngle, -90, 90);
+    const nextValue = Number((((clampedAngle + 90) / 180) * 100).toFixed(1));
+    onChange(nextValue);
+  };
+
+  useEffect(() => {
+    const finishDrag = () => {
+      draggingRef.current = false;
+      setIsDragging(false);
+    };
+    window.addEventListener('pointerup', finishDrag);
+    window.addEventListener('pointercancel', finishDrag);
+    return () => {
+      window.removeEventListener('pointerup', finishDrag);
+      window.removeEventListener('pointercancel', finishDrag);
+    };
+  }, []);
+
+  const gaugeColor = moistureColor(value);
+  const needleAngle = -90 + (value / 100) * 180;
+
+  return (
+    <div className="control-block moisture-gauge-block">
+      <div className="control-row">
+        <span className="control-label">{label}</span>
+        <span className="control-value">{formatter(value)}</span>
+      </div>
+      <div className="moisture-gauge-shell">
+        <svg
+          ref={svgRef}
+          className="moisture-gauge-svg"
+          width="164"
+          height="112"
+          viewBox="0 0 164 112"
+          onPointerDown={(event) => {
+            event.preventDefault();
+            draggingRef.current = true;
+            setIsDragging(true);
+            event.currentTarget.setPointerCapture(event.pointerId);
+            syncFromPointer(event.clientX, event.clientY);
+          }}
+          onPointerMove={(event) => {
+            if (!draggingRef.current) return;
+            event.preventDefault();
+            syncFromPointer(event.clientX, event.clientY);
+          }}
+          onPointerUp={(event) => {
+            draggingRef.current = false;
+            setIsDragging(false);
+            if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+              event.currentTarget.releasePointerCapture(event.pointerId);
+            }
+          }}
+          onPointerCancel={() => {
+            draggingRef.current = false;
+            setIsDragging(false);
+          }}
+          onLostPointerCapture={() => {
+            draggingRef.current = false;
+            setIsDragging(false);
+          }}
+        >
+          <path d="M24 72 A54 54 0 0 1 132 72" fill="none" stroke="#dbe4f0" strokeWidth="13" strokeLinecap="round" />
+          <path
+            d="M24 72 A54 54 0 0 1 132 72"
+            fill="none"
+            stroke={gaugeColor}
+            strokeWidth="13"
+            strokeLinecap="round"
+            strokeDasharray={`${(value / 100) * 170} 170`}
+          />
+          <g style={{ transform: `rotate(${needleAngle}deg)`, transformOrigin: '78px 72px' }}>
+            <line x1="78" y1="72" x2="78" y2="26" stroke="#64748b" strokeWidth="4" strokeLinecap="round" />
+            <circle cx="78" cy="26" r="4.5" fill="#64748b" />
+          </g>
+          <circle
+            cx="78"
+            cy="26"
+            r="16"
+            fill="transparent"
+            style={{ transform: `rotate(${needleAngle}deg)`, transformOrigin: '78px 72px' }}
+          />
+          <circle cx="78" cy="72" r="11" fill="#ffffff" stroke="#cbd5e1" strokeWidth="2" />
+          <circle cx="78" cy="72" r="5.5" fill={gaugeColor} />
+          <text x="7" y="82" fontSize="16" fontWeight="800" fill="#475569">0</text>
+          <text x="74" y="10" fontSize="16" fontWeight="800" fill="#475569">50</text>
+          <text x="137" y="82" fontSize="16" fontWeight="800" fill="#475569">100</text>
+        </svg>
+      </div>
     </div>
   );
 };
@@ -333,6 +445,27 @@ const ControlPage = ({ controlValues = {}, setControlValues = () => {} }) => {
         .range-slider.orange::-moz-range-thumb { background: #ea580c; }
         .range-slider.red::-moz-range-thumb { background: #dc2626; }
 
+        .moisture-gauge-block {
+          gap: 10px;
+        }
+
+        .moisture-gauge-shell {
+          display: flex;
+          justify-content: center;
+          padding: 4px 0 2px;
+          user-select: none;
+        }
+
+        .moisture-gauge-svg {
+          overflow: visible;
+          touch-action: none;
+          cursor: grab;
+        }
+
+        .moisture-gauge-svg:active {
+          cursor: grabbing;
+        }
+
         .toggle-grid {
           display: grid;
           grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -489,12 +622,9 @@ const ControlPage = ({ controlValues = {}, setControlValues = () => {} }) => {
             accentClass="field-card"
           >
             <div className="control-stack">
-              <SliderControl
+              <MoistureGaugeControl
                 label="Moisture"
                 value={values[field.moistureKey]}
-                min="0"
-                max="100"
-                step="0.1"
                 onChange={(value) => handleSliderChange(field.moistureKey, value)}
                 formatter={(value) => `${value.toFixed(1)}%`}
               />

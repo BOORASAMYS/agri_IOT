@@ -188,6 +188,17 @@ const AgricultureDashboard = () => {
   const isResetDrainingRef = useRef(false);
   const lastMainTankDataAtRef = useRef(null);
   const lastFireDataAtRef = useRef(null);
+  const moistureHoldTimeoutRef = useRef(null);
+  const moistureHoldReleaseCleanupRef = useRef(null);
+  const moistureHoldFieldKeyRef = useRef(null);
+  const moistureHoldDirectionRef = useRef(0);
+  const moistureHoldLastTouchTsRef = useRef(0);
+  const moistureHoldEditReleaseTimeoutRef = useRef({});
+  const greenhouseHoldTimeoutRef = useRef(null);
+  const greenhouseHoldReleaseCleanupRef = useRef(null);
+  const greenhouseHoldMetricRef = useRef(null);
+  const greenhouseHoldDirectionRef = useRef(0);
+  const greenhouseHoldLastTouchTsRef = useRef(0);
 
   const stopTankDrainAnimation = () => {
     if (tankDrainIntervalRef.current !== null) {
@@ -205,6 +216,207 @@ const AgricultureDashboard = () => {
   const markMainTankDirty = () => {
     dirtyMainTankRef.current = true;
   };
+
+  const clearMoistureFieldEditReleaseTimer = (fieldKey) => {
+    const timeoutId = moistureHoldEditReleaseTimeoutRef.current[fieldKey];
+    if (timeoutId) {
+      window.clearTimeout(timeoutId);
+      delete moistureHoldEditReleaseTimeoutRef.current[fieldKey];
+    }
+  };
+
+  const scheduleMoistureFieldEditRelease = (fieldKey, delayMs = 3000) => {
+    clearMoistureFieldEditReleaseTimer(fieldKey);
+    moistureHoldEditReleaseTimeoutRef.current[fieldKey] = window.setTimeout(() => {
+      activeEditFieldsRef.current[fieldKey] = false;
+      delete moistureHoldEditReleaseTimeoutRef.current[fieldKey];
+    }, delayMs);
+  };
+
+  const applyMoistureButtonStep = useCallback((fieldKey, direction) => {
+    lastLocalUpdateRef.current = Date.now();
+    activeEditFieldsRef.current[fieldKey] = true;
+    dirtyFieldsRef.current[fieldKey] = true;
+    clearMoistureFieldEditReleaseTimer(fieldKey);
+
+    setState((prev) => {
+      const currentField = prev[fieldKey];
+      const nextMoisture = Number(clampValue((currentField.moisture + direction), 0, 100).toFixed(1));
+      const nextWaterLevel = moistureToWaterLevel(nextMoisture);
+      const nextField = {
+        ...currentField,
+        moisture: nextMoisture,
+        wl: nextWaterLevel,
+      };
+
+      let nextManualOverride = manualIrrigationOverrideRef.current[fieldKey];
+      nextManualOverride = undefined;
+      nextField.irrigation = shouldFieldIrrigate(fieldKey, nextField, Boolean(currentField?.irrigation));
+
+      if (nextManualOverride === undefined) {
+        delete manualIrrigationOverrideRef.current[fieldKey];
+      } else {
+        manualIrrigationOverrideRef.current[fieldKey] = nextManualOverride;
+      }
+
+      return {
+        ...prev,
+        [fieldKey]: nextField,
+      };
+    });
+  }, []);
+
+  const stopMoistureButtonHold = useCallback(({ skipEditRelease = false } = {}) => {
+    if (moistureHoldTimeoutRef.current !== null) {
+      window.clearTimeout(moistureHoldTimeoutRef.current);
+      moistureHoldTimeoutRef.current = null;
+    }
+
+    if (moistureHoldReleaseCleanupRef.current) {
+      moistureHoldReleaseCleanupRef.current();
+      moistureHoldReleaseCleanupRef.current = null;
+    }
+
+    const fieldKey = moistureHoldFieldKeyRef.current;
+    moistureHoldDirectionRef.current = 0;
+    moistureHoldFieldKeyRef.current = null;
+
+    if (fieldKey && !skipEditRelease) {
+      scheduleMoistureFieldEditRelease(fieldKey);
+    }
+  }, []);
+
+  const startMoistureButtonHold = useCallback((fieldKey, direction, event, inputType = 'mouse') => {
+    const now = Date.now();
+    if (inputType === 'mouse' && (now - moistureHoldLastTouchTsRef.current) < 700) {
+      return;
+    }
+    if (inputType === 'touch') {
+      moistureHoldLastTouchTsRef.current = now;
+    }
+
+    if (event?.cancelable) {
+      event.preventDefault();
+    }
+
+    stopMoistureButtonHold({ skipEditRelease: true });
+    activeEditFieldsRef.current[fieldKey] = true;
+    clearMoistureFieldEditReleaseTimer(fieldKey);
+    moistureHoldFieldKeyRef.current = fieldKey;
+    moistureHoldDirectionRef.current = direction;
+
+    applyMoistureButtonStep(fieldKey, direction);
+
+    const onGlobalRelease = () => stopMoistureButtonHold();
+    window.addEventListener('mouseup', onGlobalRelease, { passive: true });
+    window.addEventListener('touchend', onGlobalRelease, { passive: true });
+    window.addEventListener('touchcancel', onGlobalRelease, { passive: true });
+    window.addEventListener('blur', onGlobalRelease, { passive: true });
+    moistureHoldReleaseCleanupRef.current = () => {
+      window.removeEventListener('mouseup', onGlobalRelease);
+      window.removeEventListener('touchend', onGlobalRelease);
+      window.removeEventListener('touchcancel', onGlobalRelease);
+      window.removeEventListener('blur', onGlobalRelease);
+    };
+
+    const repeatStep = () => {
+      const heldFieldKey = moistureHoldFieldKeyRef.current;
+      const heldDirection = moistureHoldDirectionRef.current;
+      if (!heldFieldKey || heldDirection === 0) {
+        moistureHoldTimeoutRef.current = null;
+        return;
+      }
+
+      applyMoistureButtonStep(heldFieldKey, heldDirection);
+      moistureHoldTimeoutRef.current = window.setTimeout(repeatStep, 70);
+    };
+
+    moistureHoldTimeoutRef.current = window.setTimeout(repeatStep, 180);
+  }, [applyMoistureButtonStep, stopMoistureButtonHold]);
+
+  const applyGreenhouseButtonStep = useCallback((metric, direction) => {
+    lastLocalUpdateRef.current = Date.now();
+    dirtyGreenhouseRef.current = true;
+
+    setState((prev) => {
+      const currentGreenhouse = prev.gh;
+      const nextGreenhouse = { ...currentGreenhouse };
+
+      if (metric === 'temp') {
+        nextGreenhouse.temp = clampValue(Number((currentGreenhouse.temp + direction).toFixed(1)), 20, 60);
+      } else if (metric === 'humidity') {
+        nextGreenhouse.humidity = clampValue(currentGreenhouse.humidity + (direction * 2), 30, 95);
+      }
+
+      nextGreenhouse.fanOn = getGreenhouseFanState(nextGreenhouse);
+
+      return {
+        ...prev,
+        gh: nextGreenhouse,
+      };
+    });
+  }, []);
+
+  const stopGreenhouseButtonHold = useCallback(() => {
+    if (greenhouseHoldTimeoutRef.current !== null) {
+      window.clearTimeout(greenhouseHoldTimeoutRef.current);
+      greenhouseHoldTimeoutRef.current = null;
+    }
+
+    if (greenhouseHoldReleaseCleanupRef.current) {
+      greenhouseHoldReleaseCleanupRef.current();
+      greenhouseHoldReleaseCleanupRef.current = null;
+    }
+
+    greenhouseHoldMetricRef.current = null;
+    greenhouseHoldDirectionRef.current = 0;
+  }, []);
+
+  const startGreenhouseButtonHold = useCallback((metric, direction, event, inputType = 'mouse') => {
+    const now = Date.now();
+    if (inputType === 'mouse' && (now - greenhouseHoldLastTouchTsRef.current) < 700) {
+      return;
+    }
+    if (inputType === 'touch') {
+      greenhouseHoldLastTouchTsRef.current = now;
+    }
+
+    if (event?.cancelable) {
+      event.preventDefault();
+    }
+
+    stopGreenhouseButtonHold();
+    greenhouseHoldMetricRef.current = metric;
+    greenhouseHoldDirectionRef.current = direction;
+
+    applyGreenhouseButtonStep(metric, direction);
+
+    const onGlobalRelease = () => stopGreenhouseButtonHold();
+    window.addEventListener('mouseup', onGlobalRelease, { passive: true });
+    window.addEventListener('touchend', onGlobalRelease, { passive: true });
+    window.addEventListener('touchcancel', onGlobalRelease, { passive: true });
+    window.addEventListener('blur', onGlobalRelease, { passive: true });
+    greenhouseHoldReleaseCleanupRef.current = () => {
+      window.removeEventListener('mouseup', onGlobalRelease);
+      window.removeEventListener('touchend', onGlobalRelease);
+      window.removeEventListener('touchcancel', onGlobalRelease);
+      window.removeEventListener('blur', onGlobalRelease);
+    };
+
+    const repeatStep = () => {
+      const heldMetric = greenhouseHoldMetricRef.current;
+      const heldDirection = greenhouseHoldDirectionRef.current;
+      if (!heldMetric || heldDirection === 0) {
+        greenhouseHoldTimeoutRef.current = null;
+        return;
+      }
+
+      applyGreenhouseButtonStep(heldMetric, heldDirection);
+      greenhouseHoldTimeoutRef.current = window.setTimeout(repeatStep, 75);
+    };
+
+    greenhouseHoldTimeoutRef.current = window.setTimeout(repeatStep, 180);
+  }, [applyGreenhouseButtonStep, stopGreenhouseButtonHold]);
 
   const resetDashboard = () => {
     const startingTank = state.tank;
@@ -780,6 +992,14 @@ const AgricultureDashboard = () => {
     sendMainTankToServer(buildMainTankPayload());
   }, [state.tank, state.pumping, state.mainTankManualOverride]);
 
+  useEffect(() => () => {
+    stopMoistureButtonHold({ skipEditRelease: true });
+    stopGreenhouseButtonHold();
+    Object.keys(moistureHoldEditReleaseTimeoutRef.current).forEach((fieldKey) => {
+      clearMoistureFieldEditReleaseTimer(fieldKey);
+    });
+  }, [stopMoistureButtonHold, stopGreenhouseButtonHold]);
+
   const StatusChip = ({ on, label, onClick, activeColor = '#16a34a' }) => (
     <span
       onClick={onClick}
@@ -814,7 +1034,7 @@ const AgricultureDashboard = () => {
     </div>
   );
 
-  const FieldCard = ({ data, title, fieldKey }) => {
+  const FieldCard = ({ data, title, fieldKey, onMoistureHoldStart, onMoistureHoldStop }) => {
     const showPhControls = true;
     const showChemicalControls = true;
     const [isMoistureDragging, setIsMoistureDragging] = useState(false);
@@ -831,9 +1051,10 @@ const AgricultureDashboard = () => {
     const pendingLivePatchRef = useRef({});
     const livePatchFrameRef = useRef(null);
     const moistureAnimationFrameRef = useRef(null);
-    const moistureAdjustIntervalRef = useRef(null);
-    const moistureAdjustHoldTimeoutRef = useRef(null);
+    const moistureAdjustTimeoutRef = useRef(null);
+    const moistureAdjustLastTouchTsRef = useRef(0);
     const moistureAdjustDirectionRef = useRef(0);
+    const moistureAdjustReleaseCleanupRef = useRef(null);
     const moistureTargetRef = useRef(data.moisture);
     const moistureDisplayRef = useRef(data.moisture);
     const patchTimeoutRef = useRef(null);
@@ -979,14 +1200,13 @@ const AgricultureDashboard = () => {
       scheduleFieldPatch({ moisture: normalized, wl: linkedWaterLevel });
     }, [fieldKey, moistureValue, data]);
     const releaseMoistureButtonAction = (direction) => {
-      // Clear timers immediately to stop continuous updates
-      if (moistureAdjustHoldTimeoutRef.current !== null) {
-        window.clearTimeout(moistureAdjustHoldTimeoutRef.current);
-        moistureAdjustHoldTimeoutRef.current = null;
+      if (moistureAdjustReleaseCleanupRef.current) {
+        moistureAdjustReleaseCleanupRef.current();
+        moistureAdjustReleaseCleanupRef.current = null;
       }
-      if (moistureAdjustIntervalRef.current !== null) {
-        window.clearInterval(moistureAdjustIntervalRef.current);
-        moistureAdjustIntervalRef.current = null;
+      if (moistureAdjustTimeoutRef.current !== null) {
+        window.clearTimeout(moistureAdjustTimeoutRef.current);
+        moistureAdjustTimeoutRef.current = null;
       }
       // Reset direction so any residual interval calls early-exit
       moistureAdjustDirectionRef.current = 0;
@@ -997,41 +1217,76 @@ const AgricultureDashboard = () => {
       }, 3000);
     };
     const stopMoistureButtonAdjust = () => {
-      // Clear all timers
-      if (moistureAdjustHoldTimeoutRef.current !== null) {
-        window.clearTimeout(moistureAdjustHoldTimeoutRef.current);
-        moistureAdjustHoldTimeoutRef.current = null;
+      if (moistureAdjustReleaseCleanupRef.current) {
+        moistureAdjustReleaseCleanupRef.current();
+        moistureAdjustReleaseCleanupRef.current = null;
       }
-      if (moistureAdjustIntervalRef.current !== null) {
-        window.clearInterval(moistureAdjustIntervalRef.current);
-        moistureAdjustIntervalRef.current = null;
+      if (moistureAdjustTimeoutRef.current !== null) {
+        window.clearTimeout(moistureAdjustTimeoutRef.current);
+        moistureAdjustTimeoutRef.current = null;
       }
       moistureAdjustDirectionRef.current = 0;
       activeEditFieldsRef.current[fieldKey] = false;
     };
+    const scheduleMoistureButtonRepeat = (delayMs) => {
+      if (moistureAdjustTimeoutRef.current !== null) {
+        window.clearTimeout(moistureAdjustTimeoutRef.current);
+      }
+
+      moistureAdjustTimeoutRef.current = window.setTimeout(() => {
+        moistureAdjustTimeoutRef.current = null;
+        if (moistureAdjustDirectionRef.current === 0) return;
+        triggerMoistureButtonAction(moistureAdjustDirectionRef.current);
+        scheduleMoistureButtonRepeat(65);
+      }, delayMs);
+    };
+    const bindMoistureButtonGlobalRelease = () => {
+      if (moistureAdjustReleaseCleanupRef.current) {
+        moistureAdjustReleaseCleanupRef.current();
+      }
+
+      const onGlobalRelease = () => {
+        handleMoistureButtonRelease();
+      };
+
+      window.addEventListener('mouseup', onGlobalRelease, { passive: true });
+      window.addEventListener('touchend', onGlobalRelease, { passive: true });
+      window.addEventListener('touchcancel', onGlobalRelease, { passive: true });
+      window.addEventListener('blur', onGlobalRelease, { passive: true });
+      moistureAdjustReleaseCleanupRef.current = () => {
+        window.removeEventListener('mouseup', onGlobalRelease);
+        window.removeEventListener('touchend', onGlobalRelease);
+        window.removeEventListener('touchcancel', onGlobalRelease);
+        window.removeEventListener('blur', onGlobalRelease);
+      };
+    };
     const startMoistureButtonAdjust = (direction, event) => {
       if (event.cancelable) event.preventDefault();
       stopMoistureButtonAdjust();
+
+      bindMoistureButtonGlobalRelease();
       
       activeEditFieldsRef.current[fieldKey] = true;
       moistureAdjustDirectionRef.current = direction;
       
       // Immediate update on pointerdown
       triggerMoistureButtonAction(direction);
-      
-      // Start hold timer - after 500ms, begin rapid-fire updates every 50ms
-      moistureAdjustHoldTimeoutRef.current = window.setTimeout(() => {
-        moistureAdjustHoldTimeoutRef.current = null;
-        moistureAdjustIntervalRef.current = window.setInterval(() => {
-          if (moistureAdjustDirectionRef.current !== 0) {
-            triggerMoistureButtonAction(moistureAdjustDirectionRef.current);
-          }
-        }, 50);
-      }, 500);
+
+      // Continue stepping while held after a short initial delay.
+      scheduleMoistureButtonRepeat(180);
     };
-    const handleMoistureButtonRelease = (direction) => {
+    const handleMoistureMouseDown = (direction, event) => {
+      const now = Date.now();
+      if (now - moistureAdjustLastTouchTsRef.current < 700) return;
+      startMoistureButtonAdjust(direction, event);
+    };
+    const handleMoistureTouchStart = (direction, event) => {
+      moistureAdjustLastTouchTsRef.current = Date.now();
+      startMoistureButtonAdjust(direction, event);
+    };
+    const handleMoistureButtonRelease = () => {
       if (moistureAdjustDirectionRef.current === 0) return;
-      releaseMoistureButtonAction(direction);
+      releaseMoistureButtonAction(moistureAdjustDirectionRef.current);
     };
     const animateMoistureTowardTarget = () => {
       moistureAnimationFrameRef.current = null;
@@ -1299,10 +1554,13 @@ const AgricultureDashboard = () => {
                 <button
                   type="button"
                   className="moisture-step-btn"
-                  onPointerDown={(event) => startMoistureButtonAdjust(-1, event)}
-                  onPointerUp={() => handleMoistureButtonRelease(-1)}
-                  onPointerLeave={() => handleMoistureButtonRelease(-1)}
-                  onBlur={() => handleMoistureButtonRelease(-1)}
+                  onMouseDown={(event) => onMoistureHoldStart(fieldKey, -1, event, 'mouse')}
+                  onMouseUp={onMoistureHoldStop}
+                  onMouseLeave={onMoistureHoldStop}
+                  onTouchStart={(event) => onMoistureHoldStart(fieldKey, -1, event, 'touch')}
+                  onTouchEnd={onMoistureHoldStop}
+                  onTouchCancel={onMoistureHoldStop}
+                  onContextMenu={(event) => event.preventDefault()}
                   aria-label={`Decrease ${title} moisture`}
                   title="Decrease moisture"
                 >
@@ -1312,10 +1570,13 @@ const AgricultureDashboard = () => {
                 <button
                   type="button"
                   className="moisture-step-btn"
-                  onPointerDown={(event) => startMoistureButtonAdjust(1, event)}
-                  onPointerUp={() => handleMoistureButtonRelease(1)}
-                  onPointerLeave={() => handleMoistureButtonRelease(1)}
-                  onBlur={() => handleMoistureButtonRelease(1)}
+                  onMouseDown={(event) => onMoistureHoldStart(fieldKey, 1, event, 'mouse')}
+                  onMouseUp={onMoistureHoldStop}
+                  onMouseLeave={onMoistureHoldStop}
+                  onTouchStart={(event) => onMoistureHoldStart(fieldKey, 1, event, 'touch')}
+                  onTouchEnd={onMoistureHoldStop}
+                  onTouchCancel={onMoistureHoldStop}
+                  onContextMenu={(event) => event.preventDefault()}
                   aria-label={`Increase ${title} moisture`}
                   title="Increase moisture"
                 >
@@ -2025,6 +2286,8 @@ const AgricultureDashboard = () => {
           align-items: center;
           justify-content: center;
           cursor: pointer;
+          touch-action: none;
+          user-select: none;
           box-shadow: 0 4px 10px rgba(59, 130, 246, 0.14);
           transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
         }
@@ -2238,6 +2501,8 @@ const AgricultureDashboard = () => {
           line-height: 1;
           font-size: 22px;
           font-weight: 800;
+          touch-action: none;
+          user-select: none;
           box-shadow: 0 1px 3px rgba(15, 23, 42, 0.08);
         }
         .gh-reading {
@@ -2531,7 +2796,13 @@ const AgricultureDashboard = () => {
                   <button
                     type="button"
                     className="gh-step-btn"
-                    onClick={() => updateGreenhouse({ temp: clamp(Number((state.gh.temp - 1).toFixed(1)), 20, 60) })}
+                    onMouseDown={(event) => startGreenhouseButtonHold('temp', -1, event, 'mouse')}
+                    onMouseUp={stopGreenhouseButtonHold}
+                    onMouseLeave={stopGreenhouseButtonHold}
+                    onTouchStart={(event) => startGreenhouseButtonHold('temp', -1, event, 'touch')}
+                    onTouchEnd={stopGreenhouseButtonHold}
+                    onTouchCancel={stopGreenhouseButtonHold}
+                    onContextMenu={(event) => event.preventDefault()}
                     title="Decrease temperature"
                   >
                     ▼
@@ -2563,7 +2834,13 @@ const AgricultureDashboard = () => {
                   <button
                     type="button"
                     className="gh-step-btn"
-                    onClick={() => updateGreenhouse({ temp: clamp(Number((state.gh.temp + 1).toFixed(1)), 20, 60) })}
+                    onMouseDown={(event) => startGreenhouseButtonHold('temp', 1, event, 'mouse')}
+                    onMouseUp={stopGreenhouseButtonHold}
+                    onMouseLeave={stopGreenhouseButtonHold}
+                    onTouchStart={(event) => startGreenhouseButtonHold('temp', 1, event, 'touch')}
+                    onTouchEnd={stopGreenhouseButtonHold}
+                    onTouchCancel={stopGreenhouseButtonHold}
+                    onContextMenu={(event) => event.preventDefault()}
                     title="Increase temperature"
                   >
                     ▲
@@ -2575,7 +2852,13 @@ const AgricultureDashboard = () => {
                   <button
                     type="button"
                     className="gh-step-btn"
-                    onClick={() => updateGreenhouse({ humidity: clamp(state.gh.humidity - 2, 30, 95) })}
+                    onMouseDown={(event) => startGreenhouseButtonHold('humidity', -1, event, 'mouse')}
+                    onMouseUp={stopGreenhouseButtonHold}
+                    onMouseLeave={stopGreenhouseButtonHold}
+                    onTouchStart={(event) => startGreenhouseButtonHold('humidity', -1, event, 'touch')}
+                    onTouchEnd={stopGreenhouseButtonHold}
+                    onTouchCancel={stopGreenhouseButtonHold}
+                    onContextMenu={(event) => event.preventDefault()}
                     title="Decrease humidity"
                   >
                     ▼
@@ -2589,7 +2872,13 @@ const AgricultureDashboard = () => {
                   <button
                     type="button"
                     className="gh-step-btn"
-                    onClick={() => updateGreenhouse({ humidity: clamp(state.gh.humidity + 2, 30, 95) })}
+                    onMouseDown={(event) => startGreenhouseButtonHold('humidity', 1, event, 'mouse')}
+                    onMouseUp={stopGreenhouseButtonHold}
+                    onMouseLeave={stopGreenhouseButtonHold}
+                    onTouchStart={(event) => startGreenhouseButtonHold('humidity', 1, event, 'touch')}
+                    onTouchEnd={stopGreenhouseButtonHold}
+                    onTouchCancel={stopGreenhouseButtonHold}
+                    onContextMenu={(event) => event.preventDefault()}
                     title="Increase humidity"
                   >
                     ▲
@@ -2635,15 +2924,33 @@ const AgricultureDashboard = () => {
           </div>
 
           <div className="quad-section">
-            <FieldCard data={state.f1} title="Field 1" fieldKey="f1" />
+            <FieldCard
+              data={state.f1}
+              title="Field 1"
+              fieldKey="f1"
+              onMoistureHoldStart={startMoistureButtonHold}
+              onMoistureHoldStop={stopMoistureButtonHold}
+            />
           </div>
 
           <div className="quad-section">
-            <FieldCard data={state.f2} title="Field 2" fieldKey="f2" />
+            <FieldCard
+              data={state.f2}
+              title="Field 2"
+              fieldKey="f2"
+              onMoistureHoldStart={startMoistureButtonHold}
+              onMoistureHoldStop={stopMoistureButtonHold}
+            />
           </div>
 
           <div className="quad-section">
-            <FieldCard data={state.f3} title="Field 3" fieldKey="f3" />
+            <FieldCard
+              data={state.f3}
+              title="Field 3"
+              fieldKey="f3"
+              onMoistureHoldStart={startMoistureButtonHold}
+              onMoistureHoldStop={stopMoistureButtonHold}
+            />
           </div>
         </div>
         </div>
