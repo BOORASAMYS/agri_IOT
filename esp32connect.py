@@ -18,7 +18,7 @@ STATE_FILE = os.path.join(os.path.dirname(__file__), "esp32_state.json")
 STATE_FILE_TMP = f"{STATE_FILE}.tmp"
 DEFAULT_DEVICE_IP = "192.168.0.20"
 IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD = 30.0
-IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD = 100.0
+IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD = 60.0
 IRRIGATION_PH_TARGET = 7.0
 IRRIGATION_PH_TOLERANCE = 0.05
 IRRIGATION_LOW_PH_THRESHOLD = 4.0
@@ -36,11 +36,12 @@ MOISTURE_AUTO_IRRIGATION_DURATION_SECONDS = 120.0
 DEFAULT_STATE = {
     "deviceIp": "",
     "connected": False,
+    "automationEnabled": False,
     "lastError": "ESP32 IP not configured",
     "state": {
-        "tank": 41,
+        "tank": 0.0,
         "tankSensor": {
-            "value": 41,
+            "value": 0.0,
             "online": False,
             "lastUpdatedAt": None,
             "error": "Main tank sensor not initialized",
@@ -49,8 +50,8 @@ DEFAULT_STATE = {
         "mainTankManualOverride": None,
         "flowRate": 0.0,
         "gh": {
-            "temp": 35,
-            "humidity": 65,
+            "temp": 0.0,
+            "humidity": 0.0,
             "fireAlert": False,
             "fireSensor": {
                 "online": False,
@@ -60,36 +61,36 @@ DEFAULT_STATE = {
             },
         },
         "f1": {
-            "moisture": 62.4,
-            "ph": 6.81,
-            "wl": 21.3,
-            "n": 42,
-            "p": 35,
-            "k": 55,
+            "moisture": 0.0,
+            "ph": 0.0,
+            "wl": 0.0,
+            "n": 0.0,
+            "p": 0.0,
+            "k": 0.0,
             "irrigation": False,
             "drain": False,
             "acid": False,
             "base": False,
         },
         "f2": {
-            "moisture": 60.8,
-            "ph": 8.10,
-            "wl": 13.3,
-            "n": 38,
-            "p": 28,
-            "k": 48,
+            "moisture": 0.0,
+            "ph": 0.0,
+            "wl": 0.0,
+            "n": 0.0,
+            "p": 0.0,
+            "k": 0.0,
             "irrigation": False,
             "drain": False,
             "acid": False,
             "base": False,
         },
         "f3": {
-            "moisture": 24.0,
-            "ph": 3.2,
-            "wl": 8.5,
-            "n": 22,
-            "p": 18,
-            "k": 31,
+            "moisture": 0.0,
+            "ph": 0.0,
+            "wl": 0.0,
+            "n": 0.0,
+            "p": 0.0,
+            "k": 0.0,
             "irrigation": False,
             "drain": False,
             "acid": False,
@@ -126,17 +127,8 @@ def deep_merge(base, patch):
 
 
 def load_state():
-    if not os.path.exists(STATE_FILE):
-        return deepcopy(DEFAULT_STATE)
-
-    try:
-        with open(STATE_FILE, "r", encoding="utf-8") as file:
-            saved = json.load(file)
-        merged = deep_merge(DEFAULT_STATE, saved)
-        merged.pop("lastUpdated", None)
-        return merged
-    except (OSError, json.JSONDecodeError):
-        return deepcopy(DEFAULT_STATE)
+    # Always boot with a clean zeroed state instead of restoring prior runtime values.
+    return deepcopy(DEFAULT_STATE)
 
 
 CURRENT = load_state()
@@ -174,29 +166,33 @@ def water_level_to_moisture(water_level):
 
 def moisture_to_ph(moisture):
     normalized_moisture = max(0.0, min(100.0, number_from_value(moisture, 0.0)))
-    return round(max(0.0, min(14.0, 1.0 + (normalized_moisture / 10.0))), 2)
+    return round(max(0.0, min(10.0, 2.5 + (normalized_moisture * 0.075))), 2)
 
 
 def ph_to_moisture(ph):
     normalized_ph = max(0.0, min(14.0, number_from_value(ph, IRRIGATION_PH_TARGET)))
-    return round(max(0.0, min(100.0, (normalized_ph - 1.0) * 10.0)), 1)
+    return round(max(0.0, min(100.0, (normalized_ph - 2.5) / 0.075)), 1)
 
 
-def normalize_linked_field_values(field_patch):
+def normalize_linked_field_values(field_patch, preferred_source=None):
     normalized_patch = dict(field_patch or {})
-    moisture_present = "moisture" in normalized_patch
-    water_level_present = "wl" in normalized_patch
-    ph_present = "ph" in normalized_patch
+    if preferred_source is None:
+        if "moisture" in normalized_patch:
+            preferred_source = "moisture"
+        elif "wl" in normalized_patch:
+            preferred_source = "wl"
+        elif "ph" in normalized_patch:
+            preferred_source = "ph"
 
-    if water_level_present and not moisture_present:
+    if preferred_source == "wl" and "wl" in normalized_patch:
+        normalized_patch["wl"] = max(0.0, min(30.0, number_from_value(normalized_patch["wl"], 0.0)))
         normalized_patch["moisture"] = water_level_to_moisture(normalized_patch["wl"])
-        moisture_present = True
-
-    if ph_present and not moisture_present:
+        normalized_patch["ph"] = moisture_to_ph(normalized_patch["moisture"])
+    elif preferred_source == "ph" and "ph" in normalized_patch:
+        normalized_patch["ph"] = max(0.0, min(14.0, number_from_value(normalized_patch["ph"], IRRIGATION_PH_TARGET)))
         normalized_patch["moisture"] = ph_to_moisture(normalized_patch["ph"])
-        moisture_present = True
-
-    if moisture_present:
+        normalized_patch["wl"] = moisture_to_water_level(normalized_patch["moisture"])
+    elif "moisture" in normalized_patch:
         normalized_patch["moisture"] = max(0.0, min(100.0, number_from_value(normalized_patch["moisture"], 0.0)))
         normalized_patch["wl"] = moisture_to_water_level(normalized_patch["moisture"])
         normalized_patch["ph"] = moisture_to_ph(normalized_patch["moisture"])
@@ -226,17 +222,10 @@ def resolve_auto_irrigation(field_key, field, currently_irrigating=False):
     moisture = number_from_value(field.get("moisture"), IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD)
     ph = number_from_value(field.get("ph"), IRRIGATION_PH_TARGET)
 
+    if is_ph_out_of_range(ph):
+        return True, "ph"
     if moisture >= IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD:
         return False, None
-
-    has_unsafe_ph_override_at_high_moisture = (
-        field_key in {"f1", "f2"}
-        and moisture >= IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD
-        and (ph < 4.0 or ph > 10.0)
-    )
-
-    if has_unsafe_ph_override_at_high_moisture:
-        return True, "ph"
     if moisture < IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD:
         return True, "moisture"
     return bool_from_value(currently_irrigating), "moisture" if bool_from_value(currently_irrigating) else None
@@ -616,6 +605,7 @@ def normalize_field_body(field_key, body):
     metadata = {"manual_irrigation_control": False}
     moisture_updated = False
     water_level_updated = False
+    ph_updated = False
 
     for source_key, target_key in (
         ("moisture", "moisture"),
@@ -635,9 +625,12 @@ def normalize_field_body(field_key, body):
             moisture_updated = True
         if target_key == "wl":
             water_level_updated = True
+        if target_key == "ph":
+            ph_updated = True
 
-    if moisture_updated or water_level_updated or "ph" in field_patch:
-        field_patch = normalize_linked_field_values(field_patch)
+    preferred_source = "moisture" if moisture_updated else "wl" if water_level_updated else "ph" if ph_updated else None
+    if preferred_source:
+        field_patch = normalize_linked_field_values(field_patch, preferred_source=preferred_source)
         for linked_key in ("moisture", "wl", "ph"):
             if linked_key in field_patch:
                 device_payload[linked_key] = field_patch[linked_key]
@@ -768,9 +761,12 @@ def simulation_loop():
     while True:
         time.sleep(SIMULATION_TICK_SECONDS)
         with STATE_LOCK:
+            if not bool_from_value(CURRENT.get("automationEnabled")):
+                continue
             dirty = False
             now = time.time()
             greenhouse = CURRENT.get("state", {}).get("gh")
+            active_irrigation_count = 0
             if isinstance(greenhouse, dict):
                 apply_greenhouse_rules(CURRENT)
                 if bool_from_value(greenhouse.get("fanOn")):
@@ -787,6 +783,7 @@ def simulation_loop():
                     continue
 
                 if field.get("irrigation"):
+                    active_irrigation_count += 1
                     if field.get("moisture", 0) < IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD:
                         field["moisture"] = round(min(100.0, field.get("moisture", 0) + 1.0), 1)
                         dirty = True
@@ -810,6 +807,19 @@ def simulation_loop():
                 if field.get("ph") != linked_ph:
                     field["ph"] = linked_ph
                     dirty = True
+
+                next_drain = linked_water_level > 24.0 or (bool_from_value(field.get("drain")) and linked_water_level > 17.0)
+                if bool_from_value(field.get("drain")) != next_drain:
+                    field["drain"] = next_drain
+                    dirty = True
+
+                nutrient_drain = 0.25 if bool_from_value(field.get("irrigation")) else 0.08
+                for nutrient_key in ("n", "p", "k"):
+                    current_nutrient = number_from_value(field.get(nutrient_key), 0.0)
+                    next_nutrient = round(max(0.0, current_nutrient - nutrient_drain), 1)
+                    if next_nutrient != current_nutrient:
+                        field[nutrient_key] = next_nutrient
+                        dirty = True
 
                 if field.get("moisture", 0.0) >= IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD:
                     if field.get("irrigation"):
@@ -839,6 +849,34 @@ def simulation_loop():
                     set_irrigation_run(field_key, desired_auto_reason or "manual", field, now=now)
                 else:
                     clear_irrigation_run(field_key)
+
+            if isinstance(greenhouse, dict):
+                target_temp = 31.0 if CURRENT["state"].get("pumping") else 38.0
+                temp_step = 0.4 if CURRENT["state"].get("pumping") else 0.3
+                current_temp = number_from_value(greenhouse.get("temp"), 0.0)
+                if current_temp < target_temp:
+                    next_temp = round(min(target_temp, current_temp + temp_step), 1)
+                else:
+                    next_temp = round(max(target_temp, current_temp - temp_step), 1)
+                if next_temp != current_temp:
+                    greenhouse["temp"] = next_temp
+                    dirty = True
+
+                target_humidity = 74.0 if active_irrigation_count > 0 else 62.0
+                humidity_step = 0.7 if active_irrigation_count > 0 else 0.5
+                current_humidity = number_from_value(greenhouse.get("humidity"), 0.0)
+                if current_humidity < target_humidity:
+                    next_humidity = round(min(target_humidity, current_humidity + humidity_step), 1)
+                else:
+                    next_humidity = round(max(target_humidity, current_humidity - humidity_step), 1)
+                if next_humidity != current_humidity:
+                    greenhouse["humidity"] = next_humidity
+                    dirty = True
+
+                next_fire_alert = bool_from_value(greenhouse.get("fireAlert")) or number_from_value(greenhouse.get("temp"), 0.0) >= 52.0
+                if bool_from_value(greenhouse.get("fireAlert")) != next_fire_alert:
+                    greenhouse["fireAlert"] = next_fire_alert
+                    dirty = True
 
             if dirty:
                 apply_greenhouse_rules(CURRENT)
@@ -911,6 +949,21 @@ class Handler(BaseHTTPRequestHandler):
             ip_address = normalize_ip(body.get("ip"))
             update_current({"deviceIp": ip_address}, connected=False, last_error="Connecting..." if ip_address else "ESP32 IP not configured")
             self.send_json(CURRENT)
+            return
+
+        if parsed.path == "/api/automation":
+            try:
+                body = self.read_body()
+            except json.JSONDecodeError:
+                self.send_json({"error": "Invalid JSON body"}, status=400)
+                return
+
+            enabled = bool_from_value((body or {}).get("enabled"))
+            with STATE_LOCK:
+                CURRENT["automationEnabled"] = enabled
+                save_state()
+                snapshot = deepcopy(CURRENT)
+            self.send_json({"ok": True, "automationEnabled": enabled, "dashboard": snapshot})
             return
 
         if parsed.path == "/api/irrigation/toggle":
