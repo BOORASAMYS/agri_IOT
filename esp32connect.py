@@ -30,7 +30,7 @@ GREENHOUSE_FAN_TEMP_THRESHOLD = 40.0
 GREENHOUSE_FAN_HUMIDITY_THRESHOLD = 70.0
 GREENHOUSE_TEMP_MIN = 20.0
 GREENHOUSE_TEMP_OFF_STEP_PER_TICK = 0.5
-SIMULATION_TICK_SECONDS = 4.0
+SIMULATION_TICK_SECONDS = 1.2
 MOISTURE_AUTO_IRRIGATION_DURATION_SECONDS = 120.0
 
 DEFAULT_STATE = {
@@ -761,13 +761,12 @@ def simulation_loop():
     while True:
         time.sleep(SIMULATION_TICK_SECONDS)
         with STATE_LOCK:
-            if not bool_from_value(CURRENT.get("automationEnabled")):
-                continue
+            automation_enabled = bool_from_value(CURRENT.get("automationEnabled"))
             dirty = False
             now = time.time()
             greenhouse = CURRENT.get("state", {}).get("gh")
             active_irrigation_count = 0
-            if isinstance(greenhouse, dict):
+            if automation_enabled and isinstance(greenhouse, dict):
                 apply_greenhouse_rules(CURRENT)
                 if bool_from_value(greenhouse.get("fanOn")):
                     current_temp = number_from_value(greenhouse.get("temp"), GREENHOUSE_TEMP_MIN)
@@ -782,6 +781,19 @@ def simulation_loop():
                 if not field:
                     continue
 
+                if bool_from_value(field.get("drain")):
+                    current_moisture = number_from_value(field.get("moisture"), 0.0)
+                    current_water_level = number_from_value(field.get("wl"), 0.0)
+                    next_moisture = round(max(0.0, current_moisture - 1.0), 1)
+                    next_water_level = round(max(0.0, current_water_level - 1.0), 1)
+
+                    if next_moisture != current_moisture:
+                        field["moisture"] = next_moisture
+                        dirty = True
+                    if next_water_level != current_water_level:
+                        field["wl"] = next_water_level
+                        dirty = True
+
                 if field.get("irrigation"):
                     active_irrigation_count += 1
                     if field.get("moisture", 0) < IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD:
@@ -793,15 +805,18 @@ def simulation_loop():
                         clear_irrigation_run(field_key)
                         dirty = True
 
-                else:
+                elif automation_enabled:
                     if field.get("moisture", 0) > 0.0:
                         field["moisture"] = round(max(0.0, field.get("moisture", 0) - 0.2), 1)
                         dirty = True
 
-                linked_water_level = moisture_to_water_level(field.get("moisture", 0.0))
-                if field.get("wl") != linked_water_level:
-                    field["wl"] = linked_water_level
-                    dirty = True
+                if bool_from_value(field.get("drain")):
+                    linked_water_level = number_from_value(field.get("wl"), 0.0)
+                else:
+                    linked_water_level = moisture_to_water_level(field.get("moisture", 0.0))
+                    if field.get("wl") != linked_water_level:
+                        field["wl"] = linked_water_level
+                        dirty = True
 
                 linked_ph = moisture_to_ph(field.get("moisture", 0.0))
                 if field.get("ph") != linked_ph:
@@ -850,7 +865,7 @@ def simulation_loop():
                 else:
                     clear_irrigation_run(field_key)
 
-            if isinstance(greenhouse, dict):
+            if automation_enabled and isinstance(greenhouse, dict):
                 target_temp = 31.0 if CURRENT["state"].get("pumping") else 38.0
                 temp_step = 0.4 if CURRENT["state"].get("pumping") else 0.3
                 current_temp = number_from_value(greenhouse.get("temp"), 0.0)
@@ -893,6 +908,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")

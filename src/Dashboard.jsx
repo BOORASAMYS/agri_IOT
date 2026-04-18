@@ -39,6 +39,11 @@ const getGreenhouseFanState = (greenhouse = {}) => (
   Number(greenhouse.temp ?? 0) > GREENHOUSE_FAN_TEMP_THRESHOLD
   && Number(greenhouse.humidity ?? 0) > GREENHOUSE_FAN_HUMIDITY_THRESHOLD
 );
+const getDashboardStateFromPayload = (payload) => (
+  payload?.dashboard?.state
+  ?? payload?.state
+  ?? null
+);
 const ZERO_DASHBOARD_STATE = {
   tank: 0,
   tankSensor: {
@@ -476,24 +481,22 @@ const AgricultureDashboard = () => {
           }
 
           const nextTank = Number(Math.max(0, prev.tank - dynamicDrainStep).toFixed(1));
-          const drainedPercent = Number(Math.max(0, prev.tank - nextTank).toFixed(1));
 
           const hydrateFieldFromTank = (fieldKey, field) => {
-            const nextMoisture = Number(clampValue((field.moisture ?? 0) + drainedPercent * 1.4, 0, 100).toFixed(1));
-            const nextWaterLevel = moistureToWaterLevel(nextMoisture);
-            const phFromMoisture = 1 + (nextMoisture / 10);
-            const nextPh = Number(clampValue(Math.max(field.ph ?? 0, phFromMoisture), 0, 14).toFixed(2));
+            const nextIrrigation = shouldFieldIrrigate(
+              fieldKey,
+              field,
+              Boolean(field.irrigation)
+            );
+            const nextMoisture = Number(
+              clampValue((field.moisture ?? 0) + (nextIrrigation ? 1 : 0), 0, 100).toFixed(1)
+            );
+            const linkedValues = normalizeLinkedFieldValues({ moisture: nextMoisture }, 'moisture');
 
             return {
               ...field,
-              moisture: nextMoisture,
-              wl: nextWaterLevel,
-              ph: nextPh,
-              irrigation: shouldFieldIrrigate(
-                fieldKey,
-                { ...field, moisture: nextMoisture, ph: nextPh },
-                Boolean(field.irrigation)
-              ),
+              ...linkedValues,
+              irrigation: nextIrrigation,
             };
           };
 
@@ -598,16 +601,17 @@ const AgricultureDashboard = () => {
 
     const refreshFromServer = async () => {
       try {
-        const response = await fetch(`${API_BASE}/status`);
+        const response = await fetch(`${API_BASE}/status`, { cache: 'no-store' });
         if (!response.ok) {
           throw new Error(`HTTP ${response.status}`);
         }
 
         const payload = await response.json();
-        if (isCancelled || !payload?.state) return;
+        const dashboardState = getDashboardStateFromPayload(payload);
+        if (isCancelled || !dashboardState) return;
 
         setIsAutomationEnabled(Boolean(payload.automationEnabled));
-        mergeDashboardState(payload.state);
+        mergeDashboardState(dashboardState);
       } catch (error) {
         if (!isCancelled) {
           console.error(`Python server sync failed: ${error.message}`);
@@ -737,6 +741,7 @@ const AgricultureDashboard = () => {
     try {
       const response = await fetch(endpoint, {
         method: 'POST',
+        cache: 'no-store',
         headers: {
           'Content-Type': 'application/json',
         },
@@ -744,7 +749,7 @@ const AgricultureDashboard = () => {
       });
 
       const payloadFromServer = await response.json();
-      mergeDashboardState(payloadFromServer?.dashboard?.state);
+      mergeDashboardState(getDashboardStateFromPayload(payloadFromServer));
 
       if (!response.ok) {
         throw new Error(payloadFromServer?.error || `HTTP ${response.status}`);
@@ -763,15 +768,17 @@ const AgricultureDashboard = () => {
     try {
       const response = await fetch(AUTOMATION_ENDPOINT, {
         method: 'POST',
+        cache: 'no-store',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ enabled }),
       });
       const payload = await response.json();
-      if (payload?.dashboard?.state) {
-        setIsAutomationEnabled(Boolean(payload.dashboard.automationEnabled));
-        mergeDashboardState(payload.dashboard.state);
+      const dashboardState = getDashboardStateFromPayload(payload);
+      if (dashboardState) {
+        setIsAutomationEnabled(Boolean(payload?.dashboard?.automationEnabled ?? payload?.automationEnabled));
+        mergeDashboardState(dashboardState);
       }
       if (!response.ok) {
         throw new Error(payload?.error || `HTTP ${response.status}`);
@@ -827,6 +834,7 @@ const AgricultureDashboard = () => {
     try {
       const response = await fetch(GREENHOUSE_ENDPOINT, {
         method: 'POST',
+        cache: 'no-store',
         headers: {
           'Content-Type': 'application/json',
         },
@@ -834,7 +842,7 @@ const AgricultureDashboard = () => {
       });
 
       const payloadFromServer = await response.json();
-      mergeDashboardState(payloadFromServer?.dashboard?.state);
+      mergeDashboardState(getDashboardStateFromPayload(payloadFromServer));
 
       if (!response.ok) {
         throw new Error(payloadFromServer?.error || `HTTP ${response.status}`);
@@ -855,6 +863,7 @@ const AgricultureDashboard = () => {
     try {
       const response = await fetch(MAIN_TANK_ENDPOINT, {
         method: 'POST',
+        cache: 'no-store',
         headers: {
           'Content-Type': 'application/json',
         },
@@ -862,7 +871,7 @@ const AgricultureDashboard = () => {
       });
 
       const payloadFromServer = await response.json();
-      mergeDashboardState(payloadFromServer?.dashboard?.state);
+      mergeDashboardState(getDashboardStateFromPayload(payloadFromServer));
 
       if (!response.ok) {
         throw new Error(payloadFromServer?.error || `HTTP ${response.status}`);
