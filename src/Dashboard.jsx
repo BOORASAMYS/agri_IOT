@@ -29,8 +29,6 @@ const IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD = 60;
 const MAIN_TANK_HIGH_FILL_PERCENT_PER_TICK = 2.0;
 const MAIN_TANK_LOW_FILL_PERCENT_PER_TICK = 2.0;
 const PH_TARGET = 7;
-const IRRIGATION_LOW_PH_THRESHOLD = 4;
-const IRRIGATION_HIGH_PH_THRESHOLD = 10;
 const getPhChemicalState = (ph) => ({
   acid: ph < PH_TARGET,
   base: ph > PH_TARGET,
@@ -91,8 +89,8 @@ const createInitialDashboardState = () => applyMainTankRules({
 const clampValue = (value, min, max) => Math.max(min, Math.min(max, value));
 const moistureToWaterLevel = (moisture) => Number(clampValue((moisture / 100) * 30, 0, 30).toFixed(1));
 const waterLevelToMoisture = (waterLevel) => Number(clampValue((waterLevel / 30) * 100, 0, 100).toFixed(1));
-const moistureToPh = (moisture) => Number(clampValue(2.5 + (Number(moisture ?? 0) * 0.075), 0, 10).toFixed(2));
-const phToMoisture = (ph) => Number(clampValue((Number(ph ?? PH_TARGET) - 2.5) / 0.075, 0, 100).toFixed(1));
+const moistureToPh = (moisture) => Number(clampValue((Number(moisture ?? 0) / 60) * 7, 0, 7).toFixed(2));
+const phToMoisture = (ph) => Number(clampValue((Number(ph ?? PH_TARGET) / 7) * 60, 0, 60).toFixed(1));
 const normalizeLinkedFieldValues = (patch = {}, preferredSource = null) => {
   const nextPatch = { ...patch };
   const hasMoisture = Object.prototype.hasOwnProperty.call(nextPatch, 'moisture');
@@ -106,7 +104,7 @@ const normalizeLinkedFieldValues = (patch = {}, preferredSource = null) => {
     nextPatch.moisture = waterLevelToMoisture(nextPatch.wl);
     nextPatch.ph = moistureToPh(nextPatch.moisture);
   } else if (source === 'ph' && hasPh) {
-    nextPatch.ph = Number(clampValue(nextPatch.ph, 0, 14).toFixed(2));
+    nextPatch.ph = Number(clampValue(nextPatch.ph, 0, 7).toFixed(2));
     nextPatch.moisture = phToMoisture(nextPatch.ph);
     nextPatch.wl = moistureToWaterLevel(nextPatch.moisture);
   } else if (hasMoisture) {
@@ -125,9 +123,6 @@ const normalizeLinkedFieldValues = (patch = {}, preferredSource = null) => {
 const canFieldStartIrrigation = (fieldKey, field) => shouldFieldIrrigate(fieldKey, field, false);
 const shouldFieldIrrigate = (fieldKey, field, wasIrrigating = false) => {
   const moisture = Number(field?.moisture ?? 0);
-  const ph = Number(field?.ph ?? PH_TARGET);
-  const hasUnsafePhOverride = ph < IRRIGATION_LOW_PH_THRESHOLD || ph > IRRIGATION_HIGH_PH_THRESHOLD;
-  if (hasUnsafePhOverride) return true;
   if (moisture >= IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD) return false;
   if (moisture < IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD) return true;
   return Boolean(wasIrrigating);
@@ -488,8 +483,9 @@ const AgricultureDashboard = () => {
               field,
               Boolean(field.irrigation)
             );
+            const moistureStepPerTick = (60 / 120) * (dynamicDrainIntervalMs / 1000);
             const nextMoisture = Number(
-              clampValue((field.moisture ?? 0) + (nextIrrigation ? 1 : 0), 0, 100).toFixed(1)
+              clampValue((field.moisture ?? 0) + (nextIrrigation ? moistureStepPerTick : 0), 0, 100).toFixed(1)
             );
             const linkedValues = normalizeLinkedFieldValues({ moisture: nextMoisture }, 'moisture');
 

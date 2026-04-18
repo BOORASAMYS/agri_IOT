@@ -567,24 +567,24 @@ class ControlLoopWorker:
                 field = deepcopy(CURRENT["state"][field_key])
             moisture = number_from_value(field.get("moisture"), 0.0)
             ph = number_from_value(field.get("ph"), 7.0)
-            if field_key == "f3" and is_running:
+            if field_key in {"f2", "f3"} and is_running:
                 print(
-                    f"\n[AUTO-IRRIGATION] F3 started because moisture is below 30% "
+                    f"\n[AUTO-IRRIGATION] {field_key.upper()} started because moisture is below 30% "
                     f"(current: moisture {moisture:.1f}%)."
                 )
-            elif field_key == "f3":
+            elif field_key in {"f2", "f3"}:
                 print(
-                    f"\n[AUTO-SHUTOFF] F3 stopped because moisture is above 60% "
+                    f"\n[AUTO-SHUTOFF] {field_key.upper()} stopped because moisture is above 60% "
                     f"(current: moisture {moisture:.1f}%)."
                 )
             elif is_running:
                 print(
                     f"\n[AUTO-IRRIGATION] {field_key.upper()} started because moisture is below 30% "
-                    f"and pH is outside the 4-10 range (current: moisture {moisture:.1f}%, pH {ph:.2f})."
+                    f"(current: moisture {moisture:.1f}%, pH {ph:.2f})."
                 )
             else:
                 print(
-                    f"\n[AUTO-SHUTOFF] {field_key.upper()} stopped because moisture/pH start condition is not satisfied "
+                    f"\n[AUTO-SHUTOFF] {field_key.upper()} stopped because moisture start condition is not satisfied "
                     f"(current: moisture {moisture:.1f}%, pH {ph:.2f})."
                 )
 

@@ -166,12 +166,13 @@ def water_level_to_moisture(water_level):
 
 def moisture_to_ph(moisture):
     normalized_moisture = max(0.0, min(100.0, number_from_value(moisture, 0.0)))
-    return round(max(0.0, min(10.0, 2.5 + (normalized_moisture * 0.075))), 2)
+    # pH follows moisture from 0..60 -> 0..7 and stays capped at 7 after 60.
+    return round(min(7.0, (normalized_moisture / 60.0) * 7.0), 2)
 
 
 def ph_to_moisture(ph):
-    normalized_ph = max(0.0, min(14.0, number_from_value(ph, IRRIGATION_PH_TARGET)))
-    return round(max(0.0, min(100.0, (normalized_ph - 2.5) / 0.075)), 1)
+    normalized_ph = max(0.0, min(7.0, number_from_value(ph, IRRIGATION_PH_TARGET)))
+    return round((normalized_ph / 7.0) * 60.0, 1)
 
 
 def normalize_linked_field_values(field_patch, preferred_source=None):
@@ -189,7 +190,7 @@ def normalize_linked_field_values(field_patch, preferred_source=None):
         normalized_patch["moisture"] = water_level_to_moisture(normalized_patch["wl"])
         normalized_patch["ph"] = moisture_to_ph(normalized_patch["moisture"])
     elif preferred_source == "ph" and "ph" in normalized_patch:
-        normalized_patch["ph"] = max(0.0, min(14.0, number_from_value(normalized_patch["ph"], IRRIGATION_PH_TARGET)))
+        normalized_patch["ph"] = max(0.0, min(7.0, number_from_value(normalized_patch["ph"], IRRIGATION_PH_TARGET)))
         normalized_patch["moisture"] = ph_to_moisture(normalized_patch["ph"])
         normalized_patch["wl"] = moisture_to_water_level(normalized_patch["moisture"])
     elif "moisture" in normalized_patch:
@@ -220,10 +221,7 @@ def is_ph_out_of_range(ph):
 
 def resolve_auto_irrigation(field_key, field, currently_irrigating=False):
     moisture = number_from_value(field.get("moisture"), IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD)
-    ph = number_from_value(field.get("ph"), IRRIGATION_PH_TARGET)
 
-    if is_ph_out_of_range(ph):
-        return True, "ph"
     if moisture >= IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD:
         return False, None
     if moisture < IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD:
@@ -280,16 +278,23 @@ def set_irrigation_run(field_key, reason, field, now=None):
         now = time.time()
 
     run = IRRIGATION_RUNS[field_key]
+    previous_reason = run.get("reason")
+
+    if previous_reason != reason:
+        run["start_time"] = None
+        run["start_moisture"] = None
+
     run["reason"] = reason
 
-    if reason == "moisture":
-        start_moisture = min(
-            number_from_value(field.get("moisture"), IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD),
-            IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD,
-        )
-        run["start_time"] = now
-        run["start_moisture"] = start_moisture
-        IRRIGATION_END_TIMES[field_key] = now + MOISTURE_AUTO_IRRIGATION_DURATION_SECONDS
+    if reason in {"moisture", "manual"}:
+        if run["start_time"] is None or run["start_moisture"] is None:
+            start_moisture = min(
+                number_from_value(field.get("moisture"), IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD),
+                IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD,
+            )
+            run["start_time"] = now
+            run["start_moisture"] = start_moisture
+        IRRIGATION_END_TIMES[field_key] = now + MOISTURE_AUTO_IRRIGATION_DURATION_SECONDS if reason == "moisture" else None
     else:
         run["start_time"] = None
         run["start_moisture"] = None
@@ -301,6 +306,24 @@ def clear_irrigation_run(field_key):
     IRRIGATION_RUNS[field_key]["start_time"] = None
     IRRIGATION_RUNS[field_key]["start_moisture"] = None
     IRRIGATION_END_TIMES[field_key] = None
+
+
+def get_irrigation_moisture_target(field_key, field, now):
+    current_moisture = number_from_value(field.get("moisture"), 0.0)
+    target_moisture = IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD
+    run = IRRIGATION_RUNS[field_key]
+    start_time = run.get("start_time")
+    start_moisture = run.get("start_moisture")
+
+    if start_time is None or start_moisture is None:
+        return round(current_moisture, 1)
+
+    duration = max(0.001, MOISTURE_AUTO_IRRIGATION_DURATION_SECONDS)
+    elapsed = max(0.0, now - start_time)
+    progress = min(1.0, elapsed / duration)
+    planned_moisture = start_moisture + (target_moisture - start_moisture) * progress
+    # Never move backward because of timing jitter or stale start values.
+    return round(max(current_moisture, min(target_moisture, planned_moisture)), 1)
 
 
 def apply_greenhouse_rules(state):
@@ -797,8 +820,10 @@ def simulation_loop():
                 if field.get("irrigation"):
                     active_irrigation_count += 1
                     if field.get("moisture", 0) < IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD:
-                        field["moisture"] = round(min(100.0, field.get("moisture", 0) + 1.0), 1)
-                        dirty = True
+                        next_moisture = get_irrigation_moisture_target(field_key, field, now)
+                        if next_moisture != number_from_value(field.get("moisture"), 0.0):
+                            field["moisture"] = next_moisture
+                            dirty = True
                     else:
                         field["irrigation"] = False
                         MANUAL_IRRIGATION_OVERRIDES[field_key] = False
