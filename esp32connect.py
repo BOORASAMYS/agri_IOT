@@ -34,6 +34,8 @@ SIMULATION_TICK_SECONDS = 1.2
 MOISTURE_AUTO_IRRIGATION_DURATION_SECONDS = 120.0
 AUTOMATION_CYCLE_RUN_SECONDS = 120.0
 AUTOMATION_CYCLE_BREAK_SECONDS = 5.0
+AUTOMATION_CYCLE_MOISTURE_RISE_PER_TICK = 0.6
+AUTOMATION_CYCLE_MOISTURE_FALL_PER_TICK = 0.3
 
 DEFAULT_STATE = {
     "deviceIp": "",
@@ -848,11 +850,11 @@ def simulation_loop():
                 if field.get("irrigation"):
                     active_irrigation_count += 1
                     if automation_enabled:
-                        if field.get("moisture", 0) < IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD:
-                            next_moisture = get_irrigation_moisture_target(field_key, field, now)
-                            if next_moisture != number_from_value(field.get("moisture"), 0.0):
-                                field["moisture"] = next_moisture
-                                dirty = True
+                        current_moisture = number_from_value(field.get("moisture"), 0.0)
+                        next_moisture = round(min(100.0, current_moisture + AUTOMATION_CYCLE_MOISTURE_RISE_PER_TICK), 1)
+                        if next_moisture != current_moisture:
+                            field["moisture"] = next_moisture
+                            dirty = True
                     elif field.get("moisture", 0) < IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD:
                         next_moisture = get_irrigation_moisture_target(field_key, field, now)
                         if next_moisture != number_from_value(field.get("moisture"), 0.0):
@@ -866,8 +868,11 @@ def simulation_loop():
 
                 elif automation_enabled:
                     if field.get("moisture", 0) > 0.0:
-                        field["moisture"] = round(max(0.0, field.get("moisture", 0) - 0.2), 1)
-                        dirty = True
+                        current_moisture = number_from_value(field.get("moisture"), 0.0)
+                        next_moisture = round(max(0.0, current_moisture - AUTOMATION_CYCLE_MOISTURE_FALL_PER_TICK), 1)
+                        if next_moisture != current_moisture:
+                            field["moisture"] = next_moisture
+                            dirty = True
 
                 if bool_from_value(field.get("drain")):
                     linked_water_level = number_from_value(field.get("wl"), 0.0)
@@ -1050,11 +1055,21 @@ class Handler(BaseHTTPRequestHandler):
                     for field_key in FIELD_KEYS:
                         MANUAL_IRRIGATION_OVERRIDES[field_key] = None
                 else:
-                    # Keep backend moisture thresholds active even when the
-                    # automation toggle is OFF; only clear manual override
-                    # latches so control returns to rule-based behavior.
+                    # Immediately return to threshold-based behavior when
+                    # automation is turned OFF.
                     for field_key in FIELD_KEYS:
+                        field = CURRENT.get("state", {}).get(field_key)
+                        if not isinstance(field, dict):
+                            continue
                         MANUAL_IRRIGATION_OVERRIDES[field_key] = None
+                        LOW_MOISTURE_LATCHES[field_key] = False
+                        PH_CONTROL_LATCHES[field_key] = False
+                        next_irrigation = can_start_irrigation(field_key, field)
+                        field["irrigation"] = next_irrigation
+                        if next_irrigation:
+                            set_irrigation_run(field_key, "moisture", field)
+                        else:
+                            clear_irrigation_run(field_key)
                 save_state()
                 snapshot = deepcopy(CURRENT)
             self.send_json({"ok": True, "automationEnabled": enabled, "dashboard": snapshot})

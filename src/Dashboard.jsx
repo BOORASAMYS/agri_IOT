@@ -1875,8 +1875,8 @@ const AgricultureDashboard = () => {
         .navbar-action-btn {
           border: none;
           border-radius: 14px;
-          padding: 10px 16px;
-          font-size: 16px;
+          padding: 14px 28px;
+          font-size: 18px;
           font-weight: 800;
           cursor: pointer;
           color: #ffffff;
