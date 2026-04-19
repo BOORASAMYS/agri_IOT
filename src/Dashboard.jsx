@@ -414,10 +414,10 @@ const AgricultureDashboard = () => {
       }
 
       applyGreenhouseButtonStep(heldMetric, heldDirection);
-      greenhouseHoldTimeoutRef.current = window.setTimeout(repeatStep, 75);
+      greenhouseHoldTimeoutRef.current = window.setTimeout(repeatStep, 65);
     };
 
-    greenhouseHoldTimeoutRef.current = window.setTimeout(repeatStep, 180);
+    greenhouseHoldTimeoutRef.current = window.setTimeout(repeatStep, 120);
   }, [applyGreenhouseButtonStep, stopGreenhouseButtonHold]);
 
   const resetDashboard = () => {
