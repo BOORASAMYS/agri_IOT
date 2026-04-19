@@ -106,6 +106,9 @@ ESP_INTER_REQUEST_DELAY_SECONDS = 0.2
 PLC_COMMAND_QUEUE_TIMEOUT_SECONDS = 1.0
 ESP_COMMAND_QUEUE_TIMEOUT_SECONDS = 1.0
 SHUTDOWN_DELAY_SECONDS = 5.0
+AUTOMATION_FIELD_SEQUENCE = ("f1", "f2", "f3")
+AUTOMATION_FIELD_RUN_SECONDS = float(os.getenv("AUTOMATION_FIELD_RUN_SECONDS", "6"))
+AUTOMATION_IDLE_SLEEP_SECONDS = 0.2
 MAIN_TANK_SENSOR_URL = os.getenv("MAIN_TANK_SENSOR_URL", "http://192.168.0.4/tank")
 MAIN_TANK_SENSOR_TIMEOUT_SECONDS = float(os.getenv("MAIN_TANK_SENSOR_TIMEOUT", "0.8"))
 MAIN_TANK_POLL_INTERVAL_SECONDS = float(os.getenv("MAIN_TANK_POLL_INTERVAL_SECONDS", "0.5"))
@@ -625,6 +628,135 @@ class ControlLoopWorker:
                 print(f"[ESP SYNC ERROR] ESP{esp_num}: {format_worker_error(error)}")
 
 
+class AutomationCycleWorker:
+    def __init__(self):
+        self._stop_event = threading.Event()
+        self._wake_event = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="automation-cycle-worker", daemon=True)
+
+    def start(self):
+        self._thread.start()
+
+    def stop(self):
+        self._stop_event.set()
+        self._wake_event.set()
+        self._thread.join(timeout=3)
+
+    def set_enabled(self, enabled):
+        enabled = bool(enabled)
+        with STATE_LOCK:
+            CURRENT["automationEnabled"] = enabled
+            save_state()
+
+        if enabled:
+            self._wake_event.set()
+            return
+
+        self._apply_stop_state()
+
+    def _apply_stop_state(self):
+        update_current(
+            {
+                "state": {
+                    "pumping": False,
+                    "mainTankManualOverride": False,
+                    "f1": {"irrigation": False},
+                    "f2": {"irrigation": False},
+                    "f3": {"irrigation": False},
+                }
+            },
+            connected=False,
+            last_error="",
+        )
+
+        for field_key in AUTOMATION_FIELD_SEQUENCE:
+            try:
+                enqueue_field_relay_sync(field_key, source="automation-stop")
+            except Exception as error:
+                print(f"[AUTOMATION STOP RELAY ERROR] {field_key.upper()}: {format_worker_error(error)}")
+
+        try:
+            enqueue_main_tank_sync(source="automation-stop")
+        except Exception as error:
+            print(f"[AUTOMATION STOP RELAY ERROR] MAIN TANK: {format_worker_error(error)}")
+
+        for esp_num in (1, 2, 3, 4):
+            try:
+                enqueue_esp_sync(esp_num, source="automation-stop")
+            except Exception as error:
+                print(f"[AUTOMATION STOP ESP ERROR] ESP{esp_num}: {format_worker_error(error)}")
+
+    def _activate_step(self, active_field_key):
+        field_state_patch = {
+            field_key: {"irrigation": field_key == active_field_key}
+            for field_key in AUTOMATION_FIELD_SEQUENCE
+        }
+
+        update_current(
+            {
+                "state": {
+                    "pumping": True,
+                    "mainTankManualOverride": True,
+                    **field_state_patch,
+                }
+            },
+            connected=False,
+            last_error="",
+        )
+
+        for field_key in AUTOMATION_FIELD_SEQUENCE:
+            try:
+                enqueue_field_relay_sync(field_key, source=f"automation-{active_field_key}")
+            except Exception as error:
+                print(f"[AUTOMATION RELAY ERROR] {field_key.upper()}: {format_worker_error(error)}")
+
+        try:
+            enqueue_main_tank_sync(source=f"automation-{active_field_key}")
+        except Exception as error:
+            print(f"[AUTOMATION RELAY ERROR] MAIN TANK: {format_worker_error(error)}")
+
+        for esp_num in (1, 2, 3, 4):
+            try:
+                enqueue_esp_sync(esp_num, source=f"automation-{active_field_key}")
+            except Exception as error:
+                print(f"[AUTOMATION ESP ERROR] ESP{esp_num}: {format_worker_error(error)}")
+
+    def _run(self):
+        while not self._stop_event.is_set():
+            with STATE_LOCK:
+                enabled = bool_from_value(CURRENT.get("automationEnabled"))
+
+            if not enabled:
+                self._wake_event.wait(timeout=AUTOMATION_IDLE_SLEEP_SECONDS)
+                self._wake_event.clear()
+                continue
+
+            for field_key in AUTOMATION_FIELD_SEQUENCE:
+                if self._stop_event.is_set():
+                    break
+
+                with STATE_LOCK:
+                    enabled = bool_from_value(CURRENT.get("automationEnabled"))
+                if not enabled:
+                    break
+
+                self._activate_step(field_key)
+
+                end_at = time.time() + AUTOMATION_FIELD_RUN_SECONDS
+                while time.time() < end_at and not self._stop_event.is_set():
+                    with STATE_LOCK:
+                        enabled = bool_from_value(CURRENT.get("automationEnabled"))
+                    if not enabled:
+                        break
+                    self._wake_event.wait(timeout=AUTOMATION_IDLE_SLEEP_SECONDS)
+                    self._wake_event.clear()
+
+            with STATE_LOCK:
+                still_enabled = bool_from_value(CURRENT.get("automationEnabled"))
+            if not still_enabled:
+                self._apply_stop_state()
+
+
 class MainTankSensorWorker:
     def __init__(self):
         self._stop_event = threading.Event()
@@ -841,6 +973,7 @@ class FarmhouseFireSensorWorker:
 plc_worker = PLCCommandWorker()
 esp_worker = ESPCommandWorker()
 control_worker = ControlLoopWorker(plc_worker, esp_worker)
+automation_worker = AutomationCycleWorker()
 main_tank_sensor_worker = MainTankSensorWorker()
 farmhouse_fire_sensor_worker = FarmhouseFireSensorWorker()
 
@@ -1471,6 +1604,34 @@ class UIBackendHandler(Handler):
             self.send_json(response_payload)
             return
 
+        if parsed.path == "/api/automation":
+            try:
+                body = self.read_body()
+            except json.JSONDecodeError:
+                self.send_json({"error": "Invalid JSON body"}, status=400)
+                return
+
+            enabled = bool_from_value((body or {}).get("enabled"))
+
+            try:
+                automation_worker.set_enabled(enabled)
+            except Exception as error:
+                self.send_json(
+                    {
+                        "error": f"Failed to update automation mode: {error}",
+                        "dashboard": CURRENT,
+                    },
+                    status=500,
+                )
+                return
+
+            self.send_json({
+                "ok": True,
+                "automationEnabled": enabled,
+                "dashboard": CURRENT,
+            })
+            return
+
         if parsed.path.startswith("/api/fields/"):
             field_key = parsed.path.rsplit("/", 1)[-1]
             if field_key not in self.FIELD_TO_ESP:
@@ -1573,6 +1734,7 @@ def terminal_loop():
 def shutdown_backend(server):
     print("\nManual shutdown detected. Resetting backend state to zero and switching irrigation and motor off.")
 
+    automation_worker.stop()
     control_worker.stop()
     main_tank_sensor_worker.stop()
     farmhouse_fire_sensor_worker.stop()
@@ -1710,6 +1872,7 @@ if __name__ == "__main__":
     plc_worker.start()
     esp_worker.start()
     control_worker.start()
+    automation_worker.start()
     main_tank_sensor_worker.start()
     farmhouse_fire_sensor_worker.start()
     threading.Thread(target=simulation_loop, daemon=True).start()
