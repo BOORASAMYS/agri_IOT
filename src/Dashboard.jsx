@@ -20,10 +20,9 @@ const MAIN_TANK_CAPACITY_ML = 500;
 const MAIN_TANK_REFILL_START_PERCENT = 20;
 const MAIN_TANK_FLOW_REDUCE_PERCENT = 80;
 const MAIN_TANK_FILL_TIME_MINUTES = 2;
-const MAIN_TANK_DRAIN_STEP_PERCENT = 2;
-const MAIN_TANK_DRAIN_INTERVAL_MS = 1200;
 const AUTOMATION_TICK_MS = 1200;
 const STATUS_REFRESH_INTERVAL_MS = 500;
+const RESET_HOLD_MS = 5000;
 const IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD = 30;
 const IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD = 60;
 const MAIN_TANK_HIGH_FILL_PERCENT_PER_TICK = 2.0;
@@ -54,8 +53,8 @@ const ZERO_DASHBOARD_STATE = {
   mainTankManualOverride: null,
   flowRate: 0,
   gh: {
-    temp: 0,
-    humidity: 0,
+    temp: 35,
+    humidity: 65,
     fireAlert: false,
     fanOn: false,
     fireSensor: { online: false, lastUpdatedAt: null, raw: '', error: '' },
@@ -168,6 +167,87 @@ const moveToward = (value, target, step, digits = 1) => {
   const direction = target > value ? 1 : -1;
   return Number((value + direction * step).toFixed(digits));
 };
+const moveBooleanTowardTarget = (currentValue, targetValue, ready) => (
+  ready ? Boolean(targetValue) : Boolean(currentValue)
+);
+const moveFieldTowardTarget = (currentField, targetField) => {
+  const nextMoisture = moveToward(
+    Number(currentField?.moisture ?? 0),
+    Number(targetField?.moisture ?? 0),
+    1.2,
+    1,
+  );
+  const linkedValues = normalizeLinkedFieldValues({ moisture: nextMoisture }, 'moisture');
+  const nextN = moveToward(Number(currentField?.n ?? 0), Number(targetField?.n ?? 0), 1, 1);
+  const nextP = moveToward(Number(currentField?.p ?? 0), Number(targetField?.p ?? 0), 1, 1);
+  const nextK = moveToward(Number(currentField?.k ?? 0), Number(targetField?.k ?? 0), 1, 1);
+  const closeToTarget = Math.abs(nextMoisture - Number(targetField?.moisture ?? 0)) <= 0.1;
+
+  return {
+    ...currentField,
+    ...linkedValues,
+    n: nextN,
+    p: nextP,
+    k: nextK,
+    irrigation: moveBooleanTowardTarget(currentField?.irrigation, targetField?.irrigation, closeToTarget),
+    drain: moveBooleanTowardTarget(currentField?.drain, targetField?.drain, closeToTarget),
+    acid: moveBooleanTowardTarget(currentField?.acid, targetField?.acid, closeToTarget),
+    base: moveBooleanTowardTarget(currentField?.base, targetField?.base, closeToTarget),
+  };
+};
+const moveDashboardStateTowardTarget = (currentState, targetState) => {
+  const nextF1 = moveFieldTowardTarget(currentState.f1, targetState.f1 ?? ZERO_DASHBOARD_STATE.f1);
+  const nextF2 = moveFieldTowardTarget(currentState.f2, targetState.f2 ?? ZERO_DASHBOARD_STATE.f2);
+  const nextF3 = moveFieldTowardTarget(currentState.f3, targetState.f3 ?? ZERO_DASHBOARD_STATE.f3);
+  const nextGreenhouse = {
+    ...currentState.gh,
+    ...(targetState.gh || {}),
+    temp: moveToward(Number(currentState.gh?.temp ?? 0), Number(targetState.gh?.temp ?? 0), 1, 1),
+    humidity: moveToward(Number(currentState.gh?.humidity ?? 0), Number(targetState.gh?.humidity ?? 0), 2, 1),
+    fireAlert: Boolean(targetState.gh?.fireAlert ?? currentState.gh?.fireAlert),
+  };
+  nextGreenhouse.fanOn = typeof targetState.gh?.fanOn === 'boolean'
+    ? targetState.gh.fanOn
+    : getGreenhouseFanState(nextGreenhouse);
+
+  return applyMainTankRules({
+    ...currentState,
+    tank: moveToward(Number(currentState.tank ?? 0), Number(targetState.tank ?? 0), 2, 1),
+    tankSensor: {
+      ...currentState.tankSensor,
+      ...(targetState.tankSensor || {}),
+      value: moveToward(
+        Number(currentState.tankSensor?.value ?? 0),
+        Number(targetState.tankSensor?.value ?? targetState.tank ?? 0),
+        2,
+        1,
+      ),
+    },
+    pumping: Boolean(targetState.pumping ?? currentState.pumping),
+    mainTankManualOverride: targetState.mainTankManualOverride ?? currentState.mainTankManualOverride ?? null,
+    flowRate: Number(targetState.flowRate ?? currentState.flowRate ?? 0),
+    gh: nextGreenhouse,
+    f1: nextF1,
+    f2: nextF2,
+    f3: nextF3,
+    time: new Date().toLocaleTimeString(),
+  }, currentState);
+};
+const hasResetAnimationReachedTarget = (currentState, targetState) => {
+  const closeEnough = (a, b, epsilon = 0.15) => Math.abs(Number(a ?? 0) - Number(b ?? 0)) <= epsilon;
+
+  return (
+    closeEnough(currentState.tank, targetState.tank, 0.2)
+    && closeEnough(currentState.gh?.temp, targetState.gh?.temp, 0.2)
+    && closeEnough(currentState.gh?.humidity, targetState.gh?.humidity, 0.2)
+    && ['f1', 'f2', 'f3'].every((fieldKey) => (
+      closeEnough(currentState[fieldKey]?.moisture, targetState[fieldKey]?.moisture, 0.2)
+      && closeEnough(currentState[fieldKey]?.n, targetState[fieldKey]?.n, 0.2)
+      && closeEnough(currentState[fieldKey]?.p, targetState[fieldKey]?.p, 0.2)
+      && closeEnough(currentState[fieldKey]?.k, targetState[fieldKey]?.k, 0.2)
+    ))
+  );
+};
 const AgricultureDashboard = () => {
   const BASE_DASHBOARD_WIDTH = 1480;
   const [state, setState] = useState(createInitialDashboardState);
@@ -186,8 +266,9 @@ const AgricultureDashboard = () => {
   const lastLocalUpdateRef = useRef(0);
   const activeEditFieldsRef = useRef({});
   const manualIrrigationOverrideRef = useRef({});
-  const tankDrainIntervalRef = useRef(null);
-  const isResetDrainingRef = useRef(false);
+  const resetReleaseTimeoutRef = useRef(null);
+  const isResetSequenceRef = useRef(false);
+  const resetHoldUntilRef = useRef(0);
   const lastMainTankDataAtRef = useRef(null);
   const lastFireDataAtRef = useRef(null);
   const moistureHoldTimeoutRef = useRef(null);
@@ -202,17 +283,13 @@ const AgricultureDashboard = () => {
   const greenhouseHoldDirectionRef = useRef(0);
   const greenhouseHoldLastTouchTsRef = useRef(0);
 
-  const stopTankDrainAnimation = () => {
-    if (tankDrainIntervalRef.current !== null) {
-      window.clearInterval(tankDrainIntervalRef.current);
-      tankDrainIntervalRef.current = null;
+  const stopResetSequence = () => {
+    if (resetReleaseTimeoutRef.current !== null) {
+      window.clearTimeout(resetReleaseTimeoutRef.current);
+      resetReleaseTimeoutRef.current = null;
     }
-    isResetDrainingRef.current = false;
-  };
-
-  const markSystemDirty = () => {
-    dirtyFieldsRef.current = { f1: true, f2: true, f3: true };
-    dirtyGreenhouseRef.current = true;
+    isResetSequenceRef.current = false;
+    resetHoldUntilRef.current = 0;
   };
 
   const markMainTankDirty = () => {
@@ -421,37 +498,18 @@ const AgricultureDashboard = () => {
   }, [applyGreenhouseButtonStep, stopGreenhouseButtonHold]);
 
   const resetDashboard = () => {
-    const startingTank = state.tank;
-    const fieldSnapshot = [state.f1, state.f2, state.f3];
-    const avgMoisture = fieldSnapshot.reduce((sum, field) => sum + (field?.moisture ?? 0), 0) / fieldSnapshot.length;
-    const avgWaterLevel = fieldSnapshot.reduce((sum, field) => sum + (field?.wl ?? 0), 0) / fieldSnapshot.length;
-    const moistureDemand = clampValue((100 - avgMoisture) / 100, 0, 1);
-    
-    const waterDemand = clampValue(avgWaterLevel / 30, 0, 1);
-    const drainDemandFactor = 0.55 + moistureDemand * 0.9 + waterDemand * 0.55;
-    const dynamicDrainStep = Number(clampValue(
-      MAIN_TANK_DRAIN_STEP_PERCENT * drainDemandFactor,
-      0.6,
-      6
-    ).toFixed(1));
-    const dynamicDrainIntervalMs = Math.round(clampValue(
-      MAIN_TANK_DRAIN_INTERVAL_MS * (1.15 - moistureDemand * 0.45 + waterDemand * 0.15),
-      500,
-      1800
-    ));
-
     lastLocalUpdateRef.current = Date.now();
-    markSystemDirty();
     setIsAutomationEnabled(false);
     syncAutomationState(false);
-    stopTankDrainAnimation();
+    stopResetSequence();
     activeEditFieldsRef.current = {};
     manualIrrigationOverrideRef.current = {};
     lastQueuedPayloadRef.current = {};
-    isResetDrainingRef.current = startingTank > 0;
+    isResetSequenceRef.current = true;
+    resetHoldUntilRef.current = Date.now() + RESET_HOLD_MS;
     setState({
       ...ZERO_DASHBOARD_STATE,
-      tank: startingTank,
+      tank: 0,
       pumping: false,
       flowRate: 0,
       f1: { ...ZERO_DASHBOARD_STATE.f1, irrigation: false },
@@ -459,66 +517,17 @@ const AgricultureDashboard = () => {
       f3: { ...ZERO_DASHBOARD_STATE.f3, irrigation: false },
       time: '',
     });
-
-    if (startingTank > 0) {
-      tankDrainIntervalRef.current = window.setInterval(() => {
-        lastLocalUpdateRef.current = Date.now();
-        markSystemDirty();
-        setState((prev) => {
-          if (prev.tank <= 0) {
-            stopTankDrainAnimation();
-            return {
-              ...prev,
-              tank: 0,
-              pumping: false,
-              flowRate: 0,
-            };
-          }
-
-          const nextTank = Number(Math.max(0, prev.tank - dynamicDrainStep).toFixed(1));
-
-          const hydrateFieldFromTank = (fieldKey, field) => {
-            const nextIrrigation = shouldFieldIrrigate(
-              fieldKey,
-              field,
-              Boolean(field.irrigation)
-            );
-            const moistureStepPerTick = (60 / 120) * (dynamicDrainIntervalMs / 1000);
-            const nextMoisture = Number(
-              clampValue((field.moisture ?? 0) + (nextIrrigation ? moistureStepPerTick : 0), 0, 100).toFixed(1)
-            );
-            const linkedValues = normalizeLinkedFieldValues({ moisture: nextMoisture }, 'moisture');
-
-            return {
-              ...field,
-              ...linkedValues,
-              irrigation: nextIrrigation,
-            };
-          };
-
-          if (nextTank <= 0) {
-            stopTankDrainAnimation();
-          }
-
-          return {
-            ...prev,
-            tank: nextTank,
-            pumping: false,
-            flowRate: 0,
-            f1: hydrateFieldFromTank('f1', prev.f1),
-            f2: hydrateFieldFromTank('f2', prev.f2),
-            f3: hydrateFieldFromTank('f3', prev.f3),
-          };
-        });
-      }, dynamicDrainIntervalMs);
-    }
+    resetReleaseTimeoutRef.current = window.setTimeout(() => {
+      resetReleaseTimeoutRef.current = null;
+    }, RESET_HOLD_MS);
   };
 
   const mergeDashboardState = (payloadState) => {
     if (!payloadState) return;
 
     setState((prevState) => {
-      const isResetDraining = isResetDrainingRef.current;
+      const isResetSequenceActive = isResetSequenceRef.current;
+      const isResetHoldActive = isResetSequenceActive && Date.now() < resetHoldUntilRef.current;
       const incomingMainTankDataAt = payloadState.mainTankDataAt ?? null;
       const incomingFireDataAt = payloadState.gh?.fireDataAt ?? null;
       const incomingTank = payloadState.tank;
@@ -548,14 +557,14 @@ const AgricultureDashboard = () => {
 
       const mergedState = {
         ...prevState,
-        tank: isResetDraining ? prevState.tank : (hasFreshMainTankData ? (incomingTank ?? prevState.tank) : prevState.tank),
+        tank: isResetSequenceActive ? prevState.tank : (hasFreshMainTankData ? (incomingTank ?? prevState.tank) : prevState.tank),
         tankSensor: {
           ...prevState.tankSensor,
           ...(payloadState.tankSensor || {}),
         },
-        pumping: isResetDraining ? false : (payloadState.pumping ?? prevState.pumping),
-        mainTankManualOverride: isResetDraining ? false : (payloadState.mainTankManualOverride ?? prevState.mainTankManualOverride ?? null),
-        flowRate: isResetDraining ? 0 : (payloadState.flowRate ?? prevState.flowRate),
+        pumping: isResetSequenceActive ? prevState.pumping : (payloadState.pumping ?? prevState.pumping),
+        mainTankManualOverride: isResetSequenceActive ? prevState.mainTankManualOverride : (payloadState.mainTankManualOverride ?? prevState.mainTankManualOverride ?? null),
+        flowRate: isResetSequenceActive ? prevState.flowRate : (payloadState.flowRate ?? prevState.flowRate),
         gh: {
           ...prevState.gh,
           ...(payloadState.gh || {}),
@@ -569,8 +578,34 @@ const AgricultureDashboard = () => {
         time: new Date().toLocaleTimeString(),
       };
 
-      if (isResetDraining) {
-        return mergedState;
+      if (isResetSequenceActive) {
+        if (isResetHoldActive) {
+          return {
+            ...ZERO_DASHBOARD_STATE,
+            tankSensor: {
+              ...prevState.tankSensor,
+              ...(payloadState.tankSensor || {}),
+            },
+            gh: {
+              ...ZERO_DASHBOARD_STATE.gh,
+              fireAlert: hasFreshFireData
+                ? Boolean(payloadState.gh?.fireAlert)
+                : (payloadState.gh?.fireAlert ?? false),
+              fireSensor: {
+                ...ZERO_DASHBOARD_STATE.gh.fireSensor,
+                ...(payloadState.gh?.fireSensor || {}),
+              },
+            },
+            time: new Date().toLocaleTimeString(),
+          };
+        }
+
+        const animatedState = moveDashboardStateTowardTarget(prevState, payloadState);
+        if (hasResetAnimationReachedTarget(animatedState, payloadState)) {
+          stopResetSequence();
+          return applyMainTankRules(mergedState, prevState);
+        }
+        return animatedState;
       }
 
       return applyMainTankRules(mergedState, prevState);
@@ -703,7 +738,7 @@ const AgricultureDashboard = () => {
 
   useEffect(() => {
     return () => {
-      stopTankDrainAnimation();
+      stopResetSequence();
     };
   }, []);
 

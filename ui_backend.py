@@ -28,6 +28,7 @@ from esp32connect import (
     number_from_value,
     print_field_update,
     reset_state_for_shutdown,
+    set_automation_enabled,
     update_current,
     simulation_loop,
     water_level_to_moisture,
@@ -644,15 +645,26 @@ class AutomationCycleWorker:
 
     def set_enabled(self, enabled):
         enabled = bool(enabled)
-        with STATE_LOCK:
-            CURRENT["automationEnabled"] = enabled
-            save_state()
+        set_automation_enabled(enabled)
 
-        if enabled:
-            self._wake_event.set()
-            return
+        for field_key in AUTOMATION_FIELD_SEQUENCE:
+            try:
+                enqueue_field_relay_sync(field_key, source="automation-toggle")
+            except Exception as error:
+                print(f"[AUTOMATION TOGGLE RELAY ERROR] {field_key.upper()}: {format_worker_error(error)}")
 
-        self._apply_stop_state()
+        try:
+            enqueue_main_tank_sync(source="automation-toggle")
+        except Exception as error:
+            print(f"[AUTOMATION TOGGLE RELAY ERROR] MAIN TANK: {format_worker_error(error)}")
+
+        for esp_num in (1, 2, 3, 4):
+            try:
+                enqueue_esp_sync(esp_num, source="automation-toggle")
+            except Exception as error:
+                print(f"[AUTOMATION TOGGLE ESP ERROR] ESP{esp_num}: {format_worker_error(error)}")
+
+        self._wake_event.set()
 
     def _apply_stop_state(self):
         update_current(
@@ -723,38 +735,8 @@ class AutomationCycleWorker:
 
     def _run(self):
         while not self._stop_event.is_set():
-            with STATE_LOCK:
-                enabled = bool_from_value(CURRENT.get("automationEnabled"))
-
-            if not enabled:
-                self._wake_event.wait(timeout=AUTOMATION_IDLE_SLEEP_SECONDS)
-                self._wake_event.clear()
-                continue
-
-            for field_key in AUTOMATION_FIELD_SEQUENCE:
-                if self._stop_event.is_set():
-                    break
-
-                with STATE_LOCK:
-                    enabled = bool_from_value(CURRENT.get("automationEnabled"))
-                if not enabled:
-                    break
-
-                self._activate_step(field_key)
-
-                end_at = time.time() + AUTOMATION_FIELD_RUN_SECONDS
-                while time.time() < end_at and not self._stop_event.is_set():
-                    with STATE_LOCK:
-                        enabled = bool_from_value(CURRENT.get("automationEnabled"))
-                    if not enabled:
-                        break
-                    self._wake_event.wait(timeout=AUTOMATION_IDLE_SLEEP_SECONDS)
-                    self._wake_event.clear()
-
-            with STATE_LOCK:
-                still_enabled = bool_from_value(CURRENT.get("automationEnabled"))
-            if not still_enabled:
-                self._apply_stop_state()
+            self._wake_event.wait(timeout=AUTOMATION_IDLE_SLEEP_SECONDS)
+            self._wake_event.clear()
 
 
 class MainTankSensorWorker:

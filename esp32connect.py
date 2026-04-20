@@ -32,10 +32,9 @@ GREENHOUSE_TEMP_MIN = 20.0
 GREENHOUSE_TEMP_OFF_STEP_PER_TICK = 0.5
 SIMULATION_TICK_SECONDS = 1.2
 MOISTURE_AUTO_IRRIGATION_DURATION_SECONDS = 120.0
-AUTOMATION_CYCLE_RUN_SECONDS = 120.0
-AUTOMATION_CYCLE_BREAK_SECONDS = 5.0
+AUTOMATION_STARTUP_RESET_SECONDS = 5.0
 AUTOMATION_CYCLE_MOISTURE_RISE_PER_TICK = 0.6
-AUTOMATION_CYCLE_MOISTURE_FALL_PER_TICK = 0.3
+AUTOMATION_CYCLE_MOISTURE_DRAIN_PER_TICK = 1.0
 
 DEFAULT_STATE = {
     "deviceIp": "",
@@ -54,8 +53,8 @@ DEFAULT_STATE = {
         "mainTankManualOverride": None,
         "flowRate": 0.0,
         "gh": {
-            "temp": 0.0,
-            "humidity": 0.0,
+            "temp": 35.0,
+            "humidity": 65.0,
             "fireAlert": False,
             "fireSensor": {
                 "online": False,
@@ -119,6 +118,7 @@ LAST_STATUS_SYNC_AT = 0.0
 STATUS_SYNC_IN_PROGRESS = False
 LAST_SUCCESSFUL_STATUS_PATH = "/status"
 AUTOMATION_CYCLE_STARTED_AT = None
+AUTOMATION_RESET_UNTIL = None
 
 
 def deep_merge(base, patch):
@@ -279,19 +279,94 @@ def get_irrigation_reason(field_key, field):
 
 
 def is_automation_cycle_running(now=None):
+    return not is_automation_reset_active(now)
+
+
+def is_automation_reset_active(now=None):
     if now is None:
         now = time.time()
 
-    if AUTOMATION_CYCLE_STARTED_AT is None:
-        return True
+    return AUTOMATION_RESET_UNTIL is not None and now < AUTOMATION_RESET_UNTIL
 
-    cycle_period = AUTOMATION_CYCLE_RUN_SECONDS + AUTOMATION_CYCLE_BREAK_SECONDS
-    if cycle_period <= 0:
-        return True
 
-    elapsed = max(0.0, now - AUTOMATION_CYCLE_STARTED_AT)
-    cycle_offset = elapsed % cycle_period
-    return cycle_offset < AUTOMATION_CYCLE_RUN_SECONDS
+def reset_state_for_automation_start(now=None):
+    global AUTOMATION_CYCLE_STARTED_AT
+    global AUTOMATION_RESET_UNTIL
+
+    if now is None:
+        now = time.time()
+
+    state = CURRENT.get("state", {})
+    state["tank"] = 0.0
+    state["pumping"] = False
+    state["mainTankManualOverride"] = False
+    state["flowRate"] = 0.0
+
+    for field_key in FIELD_KEYS:
+        field = state.get(field_key)
+        if not isinstance(field, dict):
+            continue
+
+        for numeric_key in ("moisture", "ph", "wl", "n", "p", "k"):
+            field[numeric_key] = 0.0
+
+        for bool_key in ("irrigation", "drain", "acid", "base"):
+            field[bool_key] = False
+
+        LOW_MOISTURE_LATCHES[field_key] = False
+        PH_CONTROL_LATCHES[field_key] = False
+        MANUAL_IRRIGATION_OVERRIDES[field_key] = None
+        clear_irrigation_run(field_key)
+
+    AUTOMATION_CYCLE_STARTED_AT = now
+    AUTOMATION_RESET_UNTIL = now + AUTOMATION_STARTUP_RESET_SECONDS
+
+
+def set_automation_enabled(enabled):
+    global AUTOMATION_CYCLE_STARTED_AT
+    global AUTOMATION_RESET_UNTIL
+
+    enabled = bool_from_value(enabled)
+    now = time.time()
+
+    with STATE_LOCK:
+        CURRENT["automationEnabled"] = enabled
+
+        if enabled:
+            reset_state_for_automation_start(now=now)
+        else:
+            AUTOMATION_CYCLE_STARTED_AT = None
+            AUTOMATION_RESET_UNTIL = None
+            CURRENT["state"]["pumping"] = False
+            CURRENT["state"]["mainTankManualOverride"] = False
+            CURRENT["state"]["flowRate"] = 0.0
+            for field_key in FIELD_KEYS:
+                field = CURRENT.get("state", {}).get(field_key)
+                if not isinstance(field, dict):
+                    continue
+                field["irrigation"] = False
+                field["drain"] = False
+                MANUAL_IRRIGATION_OVERRIDES[field_key] = None
+                LOW_MOISTURE_LATCHES[field_key] = False
+                PH_CONTROL_LATCHES[field_key] = False
+                clear_irrigation_run(field_key)
+
+        save_state()
+        return deepcopy(CURRENT)
+
+
+def resolve_automation_field_mode(field):
+    moisture = number_from_value(field.get("moisture"), 0.0)
+    drain_requested = bool_from_value(field.get("drain"))
+    was_irrigating = bool_from_value(field.get("irrigation"))
+
+    if drain_requested and moisture >= IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD:
+        return "drain"
+    if moisture >= IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD:
+        return "idle"
+    if moisture < IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD or was_irrigating:
+        return "irrigation"
+    return "idle"
 
 
 def set_irrigation_run(field_key, reason, field, now=None):
@@ -725,7 +800,7 @@ def update_current(patch, connected=None, last_error=None, field_metadata=None):
         state_patch = patch.get("state", {}) if isinstance(patch.get("state"), dict) else {}
         greenhouse_patch = state_patch.get("gh", {}) if isinstance(state_patch.get("gh"), dict) else {}
         automation_enabled = bool_from_value(merged.get("automationEnabled"))
-        automation_cycle_running = automation_enabled and is_automation_cycle_running(now)
+        automation_reset_active = automation_enabled and is_automation_reset_active(now)
 
         if "fanOn" in greenhouse_patch:
             merged["state"]["gh"]["fanOn"] = bool_from_value(greenhouse_patch.get("fanOn"))
@@ -768,8 +843,15 @@ def update_current(patch, connected=None, last_error=None, field_metadata=None):
                     MANUAL_IRRIGATION_OVERRIDES[field_key] = False
 
             if automation_enabled:
-                desired_auto_reason = "automation-cycle" if automation_cycle_running else None
-                field["irrigation"] = automation_cycle_running
+                if automation_reset_active:
+                    desired_auto_reason = None
+                    field["irrigation"] = False
+                    field["drain"] = False
+                else:
+                    automation_mode = resolve_automation_field_mode(field)
+                    desired_auto_reason = "automation-loop" if automation_mode == "irrigation" else None
+                    field["drain"] = automation_mode == "drain"
+                    field["irrigation"] = automation_mode == "irrigation"
             else:
                 desired_auto_reason = get_irrigation_reason(field_key, field)
                 manual_override = MANUAL_IRRIGATION_OVERRIDES[field_key]
@@ -800,7 +882,12 @@ def update_current(patch, connected=None, last_error=None, field_metadata=None):
             else:
                 merged["state"]["mainTankManualOverride"] = bool_from_value(manual_override)
 
-        merged["state"]["pumping"] = resolve_main_tank_pumping(merged)
+        if automation_reset_active:
+            merged["state"]["pumping"] = False
+            merged["state"]["mainTankManualOverride"] = False
+            merged["state"]["flowRate"] = 0.0
+        else:
+            merged["state"]["pumping"] = resolve_main_tank_pumping(merged)
         CURRENT.clear()
         CURRENT.update(merged)
         if connected is not None:
@@ -816,7 +903,7 @@ def simulation_loop():
             automation_enabled = bool_from_value(CURRENT.get("automationEnabled"))
             dirty = False
             now = time.time()
-            automation_cycle_running = automation_enabled and is_automation_cycle_running(now)
+            automation_reset_active = automation_enabled and is_automation_reset_active(now)
             greenhouse = CURRENT.get("state", {}).get("gh")
             active_irrigation_count = 0
             if automation_enabled and isinstance(greenhouse, dict):
@@ -834,11 +921,20 @@ def simulation_loop():
                 if not field:
                     continue
 
+                if automation_reset_active:
+                    if bool_from_value(field.get("irrigation")):
+                        field["irrigation"] = False
+                        dirty = True
+                    if bool_from_value(field.get("drain")):
+                        field["drain"] = False
+                        dirty = True
+                    continue
+
                 if bool_from_value(field.get("drain")):
                     current_moisture = number_from_value(field.get("moisture"), 0.0)
                     current_water_level = number_from_value(field.get("wl"), 0.0)
-                    next_moisture = round(max(0.0, current_moisture - 1.0), 1)
-                    next_water_level = round(max(0.0, current_water_level - 1.0), 1)
+                    next_moisture = round(max(0.0, current_moisture - AUTOMATION_CYCLE_MOISTURE_DRAIN_PER_TICK), 1)
+                    next_water_level = round(max(0.0, current_water_level - AUTOMATION_CYCLE_MOISTURE_DRAIN_PER_TICK), 1)
 
                     if next_moisture != current_moisture:
                         field["moisture"] = next_moisture
@@ -866,14 +962,6 @@ def simulation_loop():
                         clear_irrigation_run(field_key)
                         dirty = True
 
-                elif automation_enabled:
-                    if field.get("moisture", 0) > 0.0:
-                        current_moisture = number_from_value(field.get("moisture"), 0.0)
-                        next_moisture = round(max(0.0, current_moisture - AUTOMATION_CYCLE_MOISTURE_FALL_PER_TICK), 1)
-                        if next_moisture != current_moisture:
-                            field["moisture"] = next_moisture
-                            dirty = True
-
                 if bool_from_value(field.get("drain")):
                     linked_water_level = number_from_value(field.get("wl"), 0.0)
                 else:
@@ -887,7 +975,10 @@ def simulation_loop():
                     field["ph"] = linked_ph
                     dirty = True
 
-                next_drain = linked_water_level > 24.0 or (bool_from_value(field.get("drain")) and linked_water_level > 17.0)
+                if automation_enabled:
+                    next_drain = bool_from_value(field.get("drain")) and number_from_value(field.get("moisture"), 0.0) >= IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD
+                else:
+                    next_drain = linked_water_level > 24.0 or (bool_from_value(field.get("drain")) and linked_water_level > 17.0)
                 if bool_from_value(field.get("drain")) != next_drain:
                     field["drain"] = next_drain
                     dirty = True
@@ -912,8 +1003,12 @@ def simulation_loop():
                     continue
 
                 if automation_enabled:
-                    desired_auto_reason = "automation-cycle" if automation_cycle_running else None
-                    should_irrigate = automation_cycle_running
+                    automation_mode = resolve_automation_field_mode(field)
+                    desired_auto_reason = "automation-loop" if automation_mode == "irrigation" else None
+                    if bool_from_value(field.get("drain")) != (automation_mode == "drain"):
+                        field["drain"] = automation_mode == "drain"
+                        dirty = True
+                    should_irrigate = automation_mode == "irrigation"
                 else:
                     desired_auto_reason = get_irrigation_reason(field_key, field)
                     manual_override = MANUAL_IRRIGATION_OVERRIDES[field_key]
@@ -963,7 +1058,12 @@ def simulation_loop():
 
             if dirty:
                 apply_greenhouse_rules(CURRENT)
-                CURRENT["state"]["pumping"] = resolve_main_tank_pumping(CURRENT)
+                if automation_reset_active:
+                    CURRENT["state"]["pumping"] = False
+                    CURRENT["state"]["mainTankManualOverride"] = False
+                    CURRENT["state"]["flowRate"] = 0.0
+                else:
+                    CURRENT["state"]["pumping"] = resolve_main_tank_pumping(CURRENT)
                 save_state()
 
 
@@ -1045,33 +1145,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             enabled = bool_from_value((body or {}).get("enabled"))
-            with STATE_LOCK:
-                global AUTOMATION_CYCLE_STARTED_AT
-                CURRENT["automationEnabled"] = enabled
-                AUTOMATION_CYCLE_STARTED_AT = time.time() if enabled else None
-                if enabled:
-                    # Clear stale auto-off latches so irrigation can start new
-                    # low-moisture cycles when automation is re-enabled.
-                    for field_key in FIELD_KEYS:
-                        MANUAL_IRRIGATION_OVERRIDES[field_key] = None
-                else:
-                    # Immediately return to threshold-based behavior when
-                    # automation is turned OFF.
-                    for field_key in FIELD_KEYS:
-                        field = CURRENT.get("state", {}).get(field_key)
-                        if not isinstance(field, dict):
-                            continue
-                        MANUAL_IRRIGATION_OVERRIDES[field_key] = None
-                        LOW_MOISTURE_LATCHES[field_key] = False
-                        PH_CONTROL_LATCHES[field_key] = False
-                        next_irrigation = can_start_irrigation(field_key, field)
-                        field["irrigation"] = next_irrigation
-                        if next_irrigation:
-                            set_irrigation_run(field_key, "moisture", field)
-                        else:
-                            clear_irrigation_run(field_key)
-                save_state()
-                snapshot = deepcopy(CURRENT)
+            snapshot = set_automation_enabled(enabled)
             self.send_json({"ok": True, "automationEnabled": enabled, "dashboard": snapshot})
             return
 
