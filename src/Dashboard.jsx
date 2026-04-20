@@ -311,6 +311,10 @@ const AgricultureDashboard = () => {
   const [isLoadingScreenVisible, setIsLoadingScreenVisible] = useState(true);
   const [dashboardHeight, setDashboardHeight] = useState(640);
   const [dashboardScale, setDashboardScale] = useState(1);
+  const [greenhouseDisplay, setGreenhouseDisplay] = useState({
+    temp: ZERO_DASHBOARD_STATE.gh.temp,
+    humidity: ZERO_DASHBOARD_STATE.gh.humidity,
+  });
   const shellRef = useRef(null);
   const dashRef = useRef(null);
   const lastQueuedPayloadRef = useRef({});
@@ -337,6 +341,9 @@ const AgricultureDashboard = () => {
   const greenhouseHoldDirectionRef = useRef(0);
   const greenhouseHoldLastTouchTsRef = useRef(0);
   const greenhouseLoopDirectionRef = useRef(1);
+  const greenhouseEditReleaseTimeoutRef = useRef(null);
+  const greenhouseEditLockUntilRef = useRef(0);
+  const greenhouseDisplayFrameRef = useRef(null);
   const freezeAlertShownRef = useRef(false);
 
   const stopResetSequence = () => {
@@ -350,6 +357,22 @@ const AgricultureDashboard = () => {
 
   const markMainTankDirty = () => {
     dirtyMainTankRef.current = true;
+  };
+
+  const clearGreenhouseEditReleaseTimer = () => {
+    if (greenhouseEditReleaseTimeoutRef.current !== null) {
+      window.clearTimeout(greenhouseEditReleaseTimeoutRef.current);
+      greenhouseEditReleaseTimeoutRef.current = null;
+    }
+  };
+
+  const holdGreenhouseLocalValue = (delayMs = 1500) => {
+    greenhouseEditLockUntilRef.current = Date.now() + delayMs;
+    clearGreenhouseEditReleaseTimer();
+    greenhouseEditReleaseTimeoutRef.current = window.setTimeout(() => {
+      greenhouseEditLockUntilRef.current = 0;
+      greenhouseEditReleaseTimeoutRef.current = null;
+    }, delayMs);
   };
 
   const clearMoistureFieldEditReleaseTimer = (fieldKey) => {
@@ -471,6 +494,7 @@ const AgricultureDashboard = () => {
   const applyGreenhouseButtonStep = useCallback((metric, direction) => {
     lastLocalUpdateRef.current = Date.now();
     dirtyGreenhouseRef.current = true;
+    holdGreenhouseLocalValue();
 
     setState((prev) => {
       const currentGreenhouse = prev.gh;
@@ -565,6 +589,8 @@ const AgricultureDashboard = () => {
     dirtyFieldsRef.current = { f1: true, f2: true, f3: true };
     dirtyGreenhouseRef.current = true;
     dirtyMainTankRef.current = true;
+    clearGreenhouseEditReleaseTimer();
+    greenhouseEditLockUntilRef.current = 0;
     lastQueuedPayloadRef.current = {};
     isResetSequenceRef.current = true;
     resetHoldUntilRef.current = Date.now() + RESET_HOLD_MS;
@@ -588,6 +614,7 @@ const AgricultureDashboard = () => {
     if (!payloadState) return;
 
     setState((prevState) => {
+      const isGreenhouseEditLocked = Date.now() < greenhouseEditLockUntilRef.current;
       const isResetSequenceActive = isResetSequenceRef.current;
       const isResetHoldActive = isResetSequenceActive && Date.now() < resetHoldUntilRef.current;
       const incomingMainTankDataAt = payloadState.mainTankDataAt ?? null;
@@ -637,6 +664,15 @@ const AgricultureDashboard = () => {
         gh: {
           ...prevState.gh,
           ...(payloadState.gh || {}),
+          temp: isGreenhouseEditLocked
+            ? prevState.gh.temp
+            : (payloadState.gh?.temp ?? prevState.gh.temp),
+          humidity: isGreenhouseEditLocked
+            ? prevState.gh.humidity
+            : (payloadState.gh?.humidity ?? prevState.gh.humidity),
+          fanOn: isGreenhouseEditLocked
+            ? prevState.gh.fanOn
+            : (payloadState.gh?.fanOn ?? prevState.gh.fanOn),
           fireAlert: hasFreshFireData
             ? Boolean(payloadState.gh.fireAlert)
             : (payloadState.gh?.fireAlert ?? prevState.gh.fireAlert),
@@ -866,6 +902,42 @@ const AgricultureDashboard = () => {
     };
   }, []);
 
+  useEffect(() => {
+    const targetTemp = Number(state.gh?.temp ?? ZERO_DASHBOARD_STATE.gh.temp);
+    const targetHumidity = Number(state.gh?.humidity ?? ZERO_DASHBOARD_STATE.gh.humidity);
+
+    if (greenhouseDisplayFrameRef.current !== null) {
+      window.cancelAnimationFrame(greenhouseDisplayFrameRef.current);
+      greenhouseDisplayFrameRef.current = null;
+    }
+
+    const animate = () => {
+      let shouldContinue = false;
+
+      setGreenhouseDisplay((prev) => {
+        const nextTemp = moveToward(Number(prev.temp ?? targetTemp), targetTemp, 0.35, 1);
+        const nextHumidity = moveToward(Number(prev.humidity ?? targetHumidity), targetHumidity, 0.45, 1);
+        shouldContinue = nextTemp !== targetTemp || nextHumidity !== targetHumidity;
+        return { temp: nextTemp, humidity: nextHumidity };
+      });
+
+      if (shouldContinue) {
+        greenhouseDisplayFrameRef.current = window.requestAnimationFrame(animate);
+      } else {
+        greenhouseDisplayFrameRef.current = null;
+      }
+    };
+
+    greenhouseDisplayFrameRef.current = window.requestAnimationFrame(animate);
+
+    return () => {
+      if (greenhouseDisplayFrameRef.current !== null) {
+        window.cancelAnimationFrame(greenhouseDisplayFrameRef.current);
+        greenhouseDisplayFrameRef.current = null;
+      }
+    };
+  }, [state.gh.temp, state.gh.humidity]);
+
   // --- UTILS (Unchanged) ---
   const phColor = (ph) => {
     if (ph < 4) return '#ef4444';
@@ -895,9 +967,9 @@ const AgricultureDashboard = () => {
   const mainTankPumpSpeedClass = state.pumping
     ? (isMainTankReducedFlow ? 'spin-slow' : 'spin-med')
     : 'spin-stop';
-  const greenhouseTempPct = Math.min((state.gh.temp / 60) * 100, 100);
+  const greenhouseTempPct = Math.min((greenhouseDisplay.temp / 60) * 100, 100);
   const greenhouseTempColor =
-    state.gh.temp <= 24 ? '#3b82f6' : state.gh.temp <= 35 ? '#f59e0b' : '#ef4444';
+    greenhouseDisplay.temp <= 24 ? '#3b82f6' : greenhouseDisplay.temp <= 35 ? '#f59e0b' : '#ef4444';
   const mainTankFillPct = Math.min(state.tank, 100);
   const mainTankScaleTicks = [
     { value: 100, position: 100, emphasis: true },
@@ -1166,6 +1238,7 @@ const AgricultureDashboard = () => {
   useEffect(() => () => {
     stopMoistureButtonHold({ skipEditRelease: true });
     stopGreenhouseButtonHold();
+    clearGreenhouseEditReleaseTimer();
     Object.keys(moistureHoldEditReleaseTimeoutRef.current).forEach((fieldKey) => {
       clearMoistureFieldEditReleaseTimer(fieldKey);
     });
@@ -3056,7 +3129,7 @@ const AgricultureDashboard = () => {
                       }}
                     ></div>
                   </div>
-                  <span className="gh-reading-value temp">{Math.round(state.gh.temp)}°</span>
+                  <span className="gh-reading-value temp">{Math.round(greenhouseDisplay.temp)}°</span>
                 </div>
                 <div className="gh-stepper">
                   <button
@@ -3094,7 +3167,7 @@ const AgricultureDashboard = () => {
                 </div>
                 <div className="gh-reading">
                   <svg width="18" height="26" viewBox="0 0 14 20" aria-hidden="true"><path d="M7 1Q11 7 11 12A4 4 0 0 1 3 12Q3 7 7 1Z" fill="#38bdf8"/></svg>
-                  <span className="gh-reading-value humidity">{Math.round(state.gh.humidity)}%</span>
+                  <span className="gh-reading-value humidity">{Math.round(greenhouseDisplay.humidity)}%</span>
                 </div>
                 <div className="gh-stepper">
                   <button
