@@ -117,6 +117,8 @@ FARMHOUSE_FIRE_SENSOR_URL = os.getenv("FARMHOUSE_FIRE_SENSOR_URL", "http://192.1
 FARMHOUSE_FIRE_SENSOR_TIMEOUT_SECONDS = float(os.getenv("FARMHOUSE_FIRE_SENSOR_TIMEOUT", "2.0"))
 FARMHOUSE_FIRE_POLL_INTERVAL_SECONDS = float(os.getenv("FARMHOUSE_FIRE_POLL_INTERVAL", "1.0"))
 FARMHOUSE_FIRE_SENSOR_ERROR_BACKOFF_SECONDS = float(os.getenv("FARMHOUSE_FIRE_SENSOR_ERROR_BACKOFF", "20"))
+ESP32_DISTANCE_URL = os.getenv("ESP32_DISTANCE_URL", "http://192.168.0.8/distance")
+ESP32_DISTANCE_TIMEOUT_SECONDS = float(os.getenv("ESP32_DISTANCE_TIMEOUT", "2.0"))
 MAIN_TANK_STOP_PERCENT = 100.0
 MAIN_TANK_REFILL_START_PERCENT = 20.0
 MAIN_TANK_SIMULATION_STEP_PERCENT = 2.0
@@ -986,6 +988,26 @@ def parse_tank_level(raw_value):
         return float(match.group(0))
 
 
+def parse_distance_value(raw_value):
+    if isinstance(raw_value, (int, float)):
+        return float(raw_value)
+
+    if raw_value is None:
+        raise ValueError("Distance sensor returned no data")
+
+    text = str(raw_value).strip()
+    if not text:
+        raise ValueError("Distance sensor returned an empty response")
+
+    try:
+        return float(text)
+    except ValueError:
+        match = re.search(r"-?\d+(?:\.\d+)?", text)
+        if match is None:
+            raise ValueError(f"Could not parse distance from '{text}'")
+        return float(match.group(0))
+
+
 def get_dashboard_snapshot():
     with STATE_LOCK:
         return deepcopy(CURRENT)
@@ -1399,6 +1421,27 @@ class UIBackendHandler(Handler):
 
         if parsed.path == "/api/status":
             self.send_json(get_dashboard_snapshot())
+            return
+
+        if parsed.path == "/api/distance":
+            try:
+                response = requests.get(ESP32_DISTANCE_URL, timeout=ESP32_DISTANCE_TIMEOUT_SECONDS)
+                response.raise_for_status()
+                distance_cm = parse_distance_value(response.text)
+                body = f"{distance_cm:.2f}".encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+                self.send_header("Pragma", "no-cache")
+                self.send_header("Expires", "0")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+                self.send_header("Access-Control-Allow-Headers", "Content-Type")
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as error:
+                self.send_json({"error": str(error)}, status=502)
             return
 
         if parsed.path == "/api/fire":

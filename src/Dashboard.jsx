@@ -13,6 +13,7 @@ const GREENHOUSE_ENDPOINT = `${API_BASE}/greenhouse`;
 const MAIN_TANK_ENDPOINT = `${API_BASE}/main-tank`;
 const SHUTDOWN_ENDPOINT = `${API_BASE}/shutdown`;
 const AUTOMATION_ENDPOINT = `${API_BASE}/automation`;
+const ESP32_DISTANCE_ENDPOINT = `${API_BASE}/distance`;
 const DRAG_COMMIT_INTERVAL_MS = 30;
 const GREENHOUSE_FAN_TEMP_THRESHOLD = 40;
 const GREENHOUSE_FAN_HUMIDITY_THRESHOLD = 70;
@@ -22,6 +23,7 @@ const MAIN_TANK_FLOW_REDUCE_PERCENT = 80;
 const MAIN_TANK_FILL_TIME_MINUTES = 2;
 const AUTOMATION_TICK_MS = 1200;
 const STATUS_REFRESH_INTERVAL_MS = 500;
+const DISTANCE_REFRESH_INTERVAL_MS = 1000;
 const RESET_HOLD_MS = 5000;
 const IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD = 30;
 const IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD = 60;
@@ -253,6 +255,9 @@ const AgricultureDashboard = () => {
   const [state, setState] = useState(createInitialDashboardState);
   const [isAutomationEnabled, setIsAutomationEnabled] = useState(false);
   const [isShutdownRequested, setIsShutdownRequested] = useState(false);
+  const [distanceCm, setDistanceCm] = useState(null);
+  const [distanceError, setDistanceError] = useState('');
+  const [distanceLastUpdatedAt, setDistanceLastUpdatedAt] = useState(null);
 
   const [isLoadingScreenVisible, setIsLoadingScreenVisible] = useState(true);
   const [dashboardHeight, setDashboardHeight] = useState(640);
@@ -718,6 +723,42 @@ const AgricultureDashboard = () => {
   }, []);
 
   useEffect(() => {
+    let isCancelled = false;
+
+    const refreshDistance = async () => {
+      try {
+        const response = await fetch(ESP32_DISTANCE_ENDPOINT, { cache: 'no-store' });
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+
+        const rawDistance = await response.text();
+        const parsedDistance = Number.parseFloat(rawDistance);
+        if (!Number.isFinite(parsedDistance)) {
+          throw new Error(`Invalid distance value: ${rawDistance}`);
+        }
+
+        if (isCancelled) return;
+        setDistanceCm(parsedDistance);
+        setDistanceError('');
+        setDistanceLastUpdatedAt(Date.now());
+      } catch (error) {
+        if (!isCancelled) {
+          setDistanceError(error.message);
+        }
+      }
+    };
+
+    refreshDistance();
+    const intervalId = window.setInterval(refreshDistance, DISTANCE_REFRESH_INTERVAL_MS);
+
+    return () => {
+      isCancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, []);
+
+  useEffect(() => {
     const updateLayout = () => {
       if (!shellRef.current || !dashRef.current) return;
 
@@ -770,6 +811,9 @@ const AgricultureDashboard = () => {
     : getGreenhouseFanState(state.gh);
   const fireOn = state.gh.fireAlert;
   const fireSensorStatus = fireOn ? 'Fire Detected' : 'Safe';
+  const distanceSensorStatus = distanceError ? 'Offline' : distanceCm === null ? 'Waiting' : 'Live';
+  const distanceDisplay = distanceCm === null ? '—' : `${distanceCm.toFixed(2)} cm`;
+  const distanceUpdatedLabel = distanceLastUpdatedAt ? new Date(distanceLastUpdatedAt).toLocaleTimeString() : '';
   const fanSpeedClass = fanOn ? "spin-med" : "spin-stop";
   const isMainTankReducedFlow = state.pumping && state.tank > MAIN_TANK_FLOW_REDUCE_PERCENT;
   const mainTankPumpSpeedClass = state.pumping
@@ -2817,6 +2861,15 @@ const AgricultureDashboard = () => {
             <div style={{ marginTop: '14px', borderTop: '0.5px solid #f1f5f9', paddingTop: '8px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
               <div className="stat-row"><span style={{ fontSize: '24px', fontWeight: 700, color: '#64748b' }}>Flow rate</span><span style={{ fontSize: '26px', fontWeight: 500, color: '#0369a1' }}>{state.flowRate.toFixed(1)} L/min</span></div>
               <div className="stat-row"><span style={{ fontSize: '24px', fontWeight: 700, color: '#64748b' }}>Fill time</span><span style={{ fontSize: '26px', fontWeight: 500, color: '#0369a1' }}>{MAIN_TANK_FILL_TIME_MINUTES} min</span></div>
+              <div className="stat-row">
+                <span style={{ fontSize: '24px', fontWeight: 700, color: '#64748b' }}>Distance</span>
+                <span style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '4px', textAlign: 'right' }}>
+                  <span style={{ fontSize: '26px', fontWeight: 500, color: distanceError ? '#dc2626' : '#0369a1' }}>{distanceDisplay}</span>
+                  <span className="badge" style={{ fontSize: '14px', background: distanceError ? '#fee2e2' : '#dcfce7', color: distanceError ? '#b91c1c' : '#166534' }}>{distanceSensorStatus}</span>
+                  {distanceError ? <span style={{ fontSize: '12px', color: '#b91c1c' }}>{distanceError}</span> : null}
+                  {!distanceError && distanceUpdatedLabel ? <span style={{ fontSize: '12px', color: '#64748b' }}>Updated {distanceUpdatedLabel}</span> : null}
+                </span>
+              </div>
               <div className="stat-row" style={{ border: 'none' }}><span style={{ fontSize: '24px', fontWeight: 700, color: '#64748b' }}>Pump status</span><span className="badge" style={{ fontSize: '26px', background: state.pumping ? '#dbeafe' : '#f1f5f9', color: state.pumping ? '#1e40af' : '#475569' }}>{state.pumping ? 'Active' : 'Idle'}</span></div>
             </div>
           </div>
