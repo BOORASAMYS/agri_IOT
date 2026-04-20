@@ -377,11 +377,10 @@ const AgricultureDashboard = () => {
     setState((prev) => {
       const currentField = prev[fieldKey];
       const nextMoisture = Number(clampValue((currentField.moisture + direction), 0, 100).toFixed(1));
-      const nextWaterLevel = moistureToWaterLevel(nextMoisture);
+      const linkedValues = normalizeLinkedFieldValues({ moisture: nextMoisture }, 'moisture');
       const nextField = {
         ...currentField,
-        moisture: nextMoisture,
-        wl: nextWaterLevel,
+        ...linkedValues,
       };
 
       let nextManualOverride = manualIrrigationOverrideRef.current[fieldKey];
@@ -1206,7 +1205,7 @@ const AgricultureDashboard = () => {
     </div>
   );
 
-  const FieldCard = ({ data, title, fieldKey }) => {
+  const FieldCard = ({ data, title, fieldKey, onMoistureHoldStart, onMoistureHoldStop }) => {
     const showPhControls = true;
     const showChemicalControls = true;
     const [isMoistureDragging, setIsMoistureDragging] = useState(false);
@@ -1736,12 +1735,12 @@ const AgricultureDashboard = () => {
                 <button
                   type="button"
                   className="moisture-step-btn"
-                  onMouseDown={(event) => handleMoistureMouseDown(-1, event)}
-                  onMouseUp={handleMoistureButtonRelease}
-                  onMouseLeave={handleMoistureButtonRelease}
-                  onTouchStart={(event) => handleMoistureTouchStart(-1, event)}
-                  onTouchEnd={handleMoistureButtonRelease}
-                  onTouchCancel={handleMoistureButtonRelease}
+                  onMouseDown={(event) => onMoistureHoldStart(fieldKey, -1, event, 'mouse')}
+                  onMouseUp={onMoistureHoldStop}
+                  onMouseLeave={onMoistureHoldStop}
+                  onTouchStart={(event) => onMoistureHoldStart(fieldKey, -1, event, 'touch')}
+                  onTouchEnd={onMoistureHoldStop}
+                  onTouchCancel={onMoistureHoldStop}
                   onContextMenu={(event) => event.preventDefault()}
                   aria-label={`Decrease ${title} moisture`}
                   title="Decrease moisture"
@@ -1752,12 +1751,12 @@ const AgricultureDashboard = () => {
                 <button
                   type="button"
                   className="moisture-step-btn"
-                  onMouseDown={(event) => handleMoistureMouseDown(1, event)}
-                  onMouseUp={handleMoistureButtonRelease}
-                  onMouseLeave={handleMoistureButtonRelease}
-                  onTouchStart={(event) => handleMoistureTouchStart(1, event)}
-                  onTouchEnd={handleMoistureButtonRelease}
-                  onTouchCancel={handleMoistureButtonRelease}
+                  onMouseDown={(event) => onMoistureHoldStart(fieldKey, 1, event, 'mouse')}
+                  onMouseUp={onMoistureHoldStop}
+                  onMouseLeave={onMoistureHoldStop}
+                  onTouchStart={(event) => onMoistureHoldStart(fieldKey, 1, event, 'touch')}
+                  onTouchEnd={onMoistureHoldStop}
+                  onTouchCancel={onMoistureHoldStop}
                   onContextMenu={(event) => event.preventDefault()}
                   aria-label={`Increase ${title} moisture`}
                   title="Increase moisture"
@@ -3157,6 +3156,8 @@ const AgricultureDashboard = () => {
               data={state.f1}
               title="Field 1"
               fieldKey="f1"
+              onMoistureHoldStart={startMoistureButtonHold}
+              onMoistureHoldStop={stopMoistureButtonHold}
             />
           </div>
 
@@ -3165,6 +3166,8 @@ const AgricultureDashboard = () => {
               data={state.f2}
               title="Field 2"
               fieldKey="f2"
+              onMoistureHoldStart={startMoistureButtonHold}
+              onMoistureHoldStop={stopMoistureButtonHold}
             />
           </div>
 
@@ -3173,6 +3176,8 @@ const AgricultureDashboard = () => {
               data={state.f3}
               title="Field 3"
               fieldKey="f3"
+              onMoistureHoldStart={startMoistureButtonHold}
+              onMoistureHoldStop={stopMoistureButtonHold}
             />
           </div>
         </div>
