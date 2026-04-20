@@ -79,8 +79,9 @@ const moistureColor = (value) => {
   return '#10b981';
 };
 
-const SliderControl = ({ label, value, min, max, step, onChange, formatter, accentClass = '' }) => {
+const SliderControl = ({ label, value, min, max, step, onChange, formatter, accentClass = '', freeInput = false }) => {
   const handleSliderInput = (event) => onChange(event.target.value);
+  const controlClassName = `range-slider ${accentClass} ${freeInput ? 'free-input' : ''}`.trim();
 
   return (
     <div className="control-block">
@@ -89,14 +90,14 @@ const SliderControl = ({ label, value, min, max, step, onChange, formatter, acce
         <span className="control-value">{formatter(value)}</span>
       </div>
       <input
-        type="range"
-        min={min}
-        max={max}
+        type={freeInput ? 'number' : 'range'}
+        min={freeInput ? undefined : min}
+        max={freeInput ? undefined : max}
         step={step}
         value={value}
         onInput={handleSliderInput}
         onChange={handleSliderInput}
-        className={`range-slider ${accentClass}`.trim()}
+        className={controlClassName}
       />
     </div>
   );
@@ -419,6 +420,29 @@ const ControlPage = ({ controlValues = {}, setControlValues = () => {} }) => {
           user-select: none;
         }
 
+        .range-slider.free-input {
+          height: auto;
+          padding: 8px 10px;
+          border: 1px solid #cbd5e1;
+          border-radius: 10px;
+          background: #ffffff;
+          font-size: 18px;
+          font-weight: 600;
+          color: #0f172a;
+          -webkit-appearance: textfield;
+          appearance: textfield;
+        }
+
+        .range-slider.free-input::-webkit-outer-spin-button,
+        .range-slider.free-input::-webkit-inner-spin-button {
+          -webkit-appearance: none;
+          margin: 0;
+        }
+
+        .range-slider.free-input::-moz-number-spin-box {
+          display: none;
+        }
+
         .range-slider::-webkit-slider-thumb {
           -webkit-appearance: none;
           appearance: none;
@@ -593,22 +617,20 @@ const ControlPage = ({ controlValues = {}, setControlValues = () => {} }) => {
             <SliderControl
               label="Temperature"
               value={values.temperature}
-              min="20"
-              max="60"
               step="0.1"
               onChange={(value) => handleSliderChange('temperature', value)}
               formatter={(value) => `${value.toFixed(1)} C`}
               accentClass="red"
+              freeInput
             />
 
             <SliderControl
               label="Humidity"
               value={values.humidity}
-              min="30"
-              max="95"
               step="0.1"
               onChange={(value) => handleSliderChange('humidity', value)}
               formatter={(value) => `${value.toFixed(1)}%`}
+              freeInput
             />
             <br />
           </div>

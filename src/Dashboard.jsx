@@ -472,21 +472,14 @@ const AgricultureDashboard = () => {
 
     setState((prev) => {
       const currentGreenhouse = prev.gh;
-      const step = metric === 'humidity' ? 1 : 1;
-      const nextTemp = clampValue(
-        Number((Number(currentGreenhouse.temp ?? GREENHOUSE_LOOP_TEMP_MIN) + (direction * step)).toFixed(1)),
-        GREENHOUSE_LOOP_TEMP_MIN,
-        GREENHOUSE_LOOP_TEMP_MAX,
-      );
+      const step = 1;
+      const currentTemp = Number(currentGreenhouse.temp ?? ZERO_DASHBOARD_STATE.gh.temp);
+      const currentHumidity = Number(currentGreenhouse.humidity ?? ZERO_DASHBOARD_STATE.gh.humidity);
       const nextGreenhouse = {
         ...currentGreenhouse,
-        temp: nextTemp,
-        humidity: getCoupledHumidityFromTemp(nextTemp),
+        temp: metric === 'temp' ? Number((currentTemp + (direction * step)).toFixed(1)) : currentTemp,
+        humidity: metric === 'humidity' ? Number((currentHumidity + (direction * step)).toFixed(1)) : currentHumidity,
       };
-
-      greenhouseLoopDirectionRef.current = direction >= 0 ? 1 : -1;
-      if (nextTemp >= GREENHOUSE_LOOP_TEMP_MAX) greenhouseLoopDirectionRef.current = -1;
-      if (nextTemp <= GREENHOUSE_LOOP_TEMP_MIN) greenhouseLoopDirectionRef.current = 1;
 
       nextGreenhouse.fanOn = getGreenhouseFanState(nextGreenhouse);
 
@@ -779,39 +772,6 @@ const AgricultureDashboard = () => {
       window.clearInterval(intervalId);
     };
   }, []);
-
-  useEffect(() => {
-    const intervalId = window.setInterval(() => {
-      if (isAutomationEnabled) {
-        return;
-      }
-
-      if (isResetSequenceRef.current && Date.now() < resetHoldUntilRef.current) {
-        return;
-      }
-
-      lastLocalUpdateRef.current = Date.now();
-      dirtyGreenhouseRef.current = true;
-
-      setState((prev) => {
-        const { nextGreenhouse, nextDirection } = advanceGreenhouseLoop(
-          prev.gh,
-          greenhouseLoopDirectionRef.current,
-        );
-
-        greenhouseLoopDirectionRef.current = nextDirection;
-
-        return {
-          ...prev,
-          gh: nextGreenhouse,
-        };
-      });
-    }, GREENHOUSE_LOOP_TICK_MS);
-
-    return () => {
-      window.clearInterval(intervalId);
-    };
-  }, [isAutomationEnabled]);
 
   useEffect(() => {
     let isCancelled = false;
@@ -1347,6 +1307,14 @@ const AgricultureDashboard = () => {
         updateField(nextPatch);
       }
     };
+    const commitFieldPatch = (patch) => {
+      pendingFieldPatchRef.current = { ...pendingFieldPatchRef.current, ...patch };
+      if (patchTimeoutRef.current !== null) {
+        window.clearTimeout(patchTimeoutRef.current);
+        patchTimeoutRef.current = null;
+      }
+      flushFieldPatch();
+    };
     const stopMoistureAnimation = () => {
       if (moistureAnimationFrameRef.current !== null) {
         window.cancelAnimationFrame(moistureAnimationFrameRef.current);
@@ -1358,7 +1326,7 @@ const AgricultureDashboard = () => {
       const linkedValues = normalizeLinkedFieldValues({ moisture: normalized });
       moistureDisplayRef.current = normalized;
       setLivePatch(linkedValues);
-      scheduleFieldPatch(linkedValues);
+      commitFieldPatch(linkedValues);
     };
     const triggerMoistureButtonAction = useCallback((direction) => {
       activeEditFieldsRef.current[fieldKey] = true;
@@ -1385,8 +1353,8 @@ const AgricultureDashboard = () => {
         base: linkedValues.base
       }));
       
-      // Schedule backend patch at normal throttle rate (30ms batching)
-      scheduleFieldPatch(linkedValues);
+      // Commit moisture changes immediately so the backend sees the new value right away.
+      commitFieldPatch(linkedValues);
     }, [fieldKey, moistureValue, data]);
     const releaseMoistureButtonAction = (direction) => {
       if (moistureAdjustReleaseCleanupRef.current) {
@@ -1527,12 +1495,8 @@ const AgricultureDashboard = () => {
       const moisture = ((clampedAngle + 90) / 180) * 100;
       const next = Number(moisture.toFixed(1));
       moistureTargetRef.current = next;
-      if (immediate) {
-        stopMoistureAnimation();
-        setMoistureDisplayValue(next);
-        return;
-      }
-      queueMoistureAnimation();
+      stopMoistureAnimation();
+      setMoistureDisplayValue(next);
     };
     const setPhFromPointer = (clientX) => {
       if (!phTrackRef.current) return;
