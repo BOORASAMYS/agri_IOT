@@ -810,6 +810,7 @@ def update_current(patch, connected=None, last_error=None, field_metadata=None):
             field_patch = state_patch.get(field_key, {}) if isinstance(state_patch.get(field_key), dict) else {}
             metadata = (field_metadata or {}).get(field_key, {})
             sensor_update_present = any(key in field_patch for key in ("moisture", "wl", "ph", "n", "p", "k"))
+            moisture_position_updated = any(key in field_patch for key in ("moisture", "wl", "ph"))
 
             if sensor_update_present:
                 normalized_field_patch = normalize_linked_field_values(field_patch)
@@ -832,6 +833,11 @@ def update_current(patch, connected=None, last_error=None, field_metadata=None):
 
             if "moisture" in field_patch or "wl" in field_patch:
                 MANUAL_IRRIGATION_OVERRIDES[field_key] = None
+
+            if moisture_position_updated:
+                # Restart the timed climb from the user's latest moisture position
+                # so the value rises smoothly toward 60% instead of using a stale run.
+                clear_irrigation_run(field_key)
 
             if metadata.get("manual_irrigation_control") and "irrigation" in field_patch:
                 requested_manual_irrigation = bool_from_value(field_patch.get("irrigation"))
