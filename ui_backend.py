@@ -645,6 +645,12 @@ class AutomationCycleWorker:
 
     def set_enabled(self, enabled):
         enabled = bool(enabled)
+        with STATE_LOCK:
+            current_enabled = bool_from_value(CURRENT.get("automationEnabled"))
+
+        if current_enabled == enabled:
+            return
+
         set_automation_enabled(enabled)
 
         for field_key in AUTOMATION_FIELD_SEQUENCE:

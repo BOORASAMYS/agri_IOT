@@ -500,10 +500,14 @@ const AgricultureDashboard = () => {
   const resetDashboard = () => {
     lastLocalUpdateRef.current = Date.now();
     setIsAutomationEnabled(false);
-    syncAutomationState(false);
+    if (isAutomationEnabled) {
+      syncAutomationState(false);
+    }
     stopResetSequence();
     activeEditFieldsRef.current = {};
     manualIrrigationOverrideRef.current = {};
+    dirtyFieldsRef.current = { f1: true, f2: true, f3: true };
+    dirtyMainTankRef.current = true;
     lastQueuedPayloadRef.current = {};
     isResetSequenceRef.current = true;
     resetHoldUntilRef.current = Date.now() + RESET_HOLD_MS;
@@ -512,9 +516,9 @@ const AgricultureDashboard = () => {
       tank: 0,
       pumping: false,
       flowRate: 0,
-      f1: { ...ZERO_DASHBOARD_STATE.f1, irrigation: false },
-      f2: { ...ZERO_DASHBOARD_STATE.f2, irrigation: false },
-      f3: { ...ZERO_DASHBOARD_STATE.f3, irrigation: false },
+      f1: { ...ZERO_DASHBOARD_STATE.f1, irrigation: true },
+      f2: { ...ZERO_DASHBOARD_STATE.f2, irrigation: true },
+      f3: { ...ZERO_DASHBOARD_STATE.f3, irrigation: true },
       time: '',
     });
     resetReleaseTimeoutRef.current = window.setTimeout(() => {
@@ -582,6 +586,9 @@ const AgricultureDashboard = () => {
         if (isResetHoldActive) {
           return {
             ...ZERO_DASHBOARD_STATE,
+            f1: { ...ZERO_DASHBOARD_STATE.f1, irrigation: true },
+            f2: { ...ZERO_DASHBOARD_STATE.f2, irrigation: true },
+            f3: { ...ZERO_DASHBOARD_STATE.f3, irrigation: true },
             tankSensor: {
               ...prevState.tankSensor,
               ...(payloadState.tankSensor || {}),
