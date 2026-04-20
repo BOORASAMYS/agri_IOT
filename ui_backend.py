@@ -111,7 +111,7 @@ AUTOMATION_FIELD_SEQUENCE = ("f1", "f2", "f3")
 AUTOMATION_FIELD_RUN_SECONDS = float(os.getenv("AUTOMATION_FIELD_RUN_SECONDS", "6"))
 AUTOMATION_IDLE_SLEEP_SECONDS = 0.2
 MAIN_TANK_SENSOR_URL = os.getenv("MAIN_TANK_SENSOR_URL", "http://192.168.0.4/tank")
-MAIN_TANK_SENSOR_TIMEOUT_SECONDS = float(os.getenv("MAIN_TANK_SENSOR_TIMEOUT", "0.8"))
+MAIN_TANK_SENSOR_TIMEOUT_SECONDS = float(os.getenv("MAIN_TANK_SENSOR_TIMEOUT", "2.0"))
 MAIN_TANK_POLL_INTERVAL_SECONDS = float(os.getenv("MAIN_TANK_POLL_INTERVAL_SECONDS", "0.5"))
 FARMHOUSE_FIRE_SENSOR_URL = os.getenv("FARMHOUSE_FIRE_SENSOR_URL", "http://192.168.0.7/fire")
 FARMHOUSE_FIRE_SENSOR_TIMEOUT_SECONDS = float(os.getenv("FARMHOUSE_FIRE_SENSOR_TIMEOUT", "2.0"))
@@ -123,7 +123,7 @@ MAIN_TANK_STOP_PERCENT = 100.0
 MAIN_TANK_REFILL_START_PERCENT = 20.0
 MAIN_TANK_SIMULATION_STEP_PERCENT = 2.0
 PLC_OFFLINE_COOLDOWN_SECONDS = float(os.getenv("PLC_OFFLINE_COOLDOWN", "20"))
-MAIN_TANK_SENSOR_ERROR_BACKOFF_SECONDS = float(os.getenv("MAIN_TANK_SENSOR_ERROR_BACKOFF", "20"))
+MAIN_TANK_SENSOR_ERROR_BACKOFF_SECONDS = float(os.getenv("MAIN_TANK_SENSOR_ERROR_BACKOFF", "2"))
 MAIN_TANK_RELAY_COMMAND_LOCK = threading.Lock()
 MAIN_TANK_LAST_REQUESTED_STATE = None
 SHUTDOWN_IN_PROGRESS = False
@@ -817,20 +817,6 @@ class MainTankSensorWorker:
                         }
                     }
                 )
-                if current_tank < MAIN_TANK_STOP_PERCENT:
-                    fallback_tank = round(min(MAIN_TANK_STOP_PERCENT, current_tank + MAIN_TANK_SIMULATION_STEP_PERCENT), 1)
-                    update_current(
-                        {
-                            "state": {
-                                "tank": fallback_tank,
-                                "mainTankDataAt": time.time(),
-                            }
-                        }
-                    )
-                    try:
-                        enqueue_main_tank_sync(source="main-tank-fallback")
-                    except Exception as relay_error:
-                        print(f"[MAIN TANK RELAY ERROR] {format_worker_error(relay_error)}")
             self._stop_event.wait(MAIN_TANK_POLL_INTERVAL_SECONDS)
 
     def _fetch_tank_level(self):

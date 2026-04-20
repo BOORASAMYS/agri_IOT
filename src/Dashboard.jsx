@@ -32,6 +32,7 @@ const MAIN_TANK_FILL_TIME_MINUTES = 2;
 const AUTOMATION_TICK_MS = 1200;
 const STATUS_REFRESH_INTERVAL_MS = 500;
 const DISTANCE_REFRESH_INTERVAL_MS = 1000;
+const DISTANCE_FREEZE_THRESHOLD_CM = 1000;
 const RESET_HOLD_MS = 5000;
 const IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD = 30;
 const IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD = 60;
@@ -305,6 +306,7 @@ const AgricultureDashboard = () => {
   const [distanceCm, setDistanceCm] = useState(null);
   const [distanceError, setDistanceError] = useState('');
   const [distanceLastUpdatedAt, setDistanceLastUpdatedAt] = useState(null);
+  const [isDashboardFrozen, setIsDashboardFrozen] = useState(false);
 
   const [isLoadingScreenVisible, setIsLoadingScreenVisible] = useState(true);
   const [dashboardHeight, setDashboardHeight] = useState(640);
@@ -335,6 +337,7 @@ const AgricultureDashboard = () => {
   const greenhouseHoldDirectionRef = useRef(0);
   const greenhouseHoldLastTouchTsRef = useRef(0);
   const greenhouseLoopDirectionRef = useRef(1);
+  const freezeAlertShownRef = useRef(false);
 
   const stopResetSequence = () => {
     if (resetReleaseTimeoutRef.current !== null) {
@@ -590,9 +593,14 @@ const AgricultureDashboard = () => {
       const isResetHoldActive = isResetSequenceActive && Date.now() < resetHoldUntilRef.current;
       const incomingMainTankDataAt = payloadState.mainTankDataAt ?? null;
       const incomingFireDataAt = payloadState.gh?.fireDataAt ?? null;
-      const incomingTank = payloadState.tank;
+      const incomingTankNumber = Number(payloadState.tank);
+      const hasIncomingTankValue = Number.isFinite(incomingTankNumber);
+      const incomingTankSensorValue = Number(payloadState.tankSensor?.value);
+      const hasIncomingTankSensorValue = Number.isFinite(incomingTankSensorValue);
+      const incomingResolvedTank = hasIncomingTankSensorValue ? incomingTankSensorValue : incomingTankNumber;
+      const hasIncomingResolvedTank = Number.isFinite(incomingResolvedTank);
       const hasFreshMainTankTimestamp = incomingMainTankDataAt !== null && incomingMainTankDataAt !== lastMainTankDataAtRef.current;
-      const hasTankValueChanged = typeof incomingTank === 'number' && incomingTank !== prevState.tank;
+      const hasTankValueChanged = hasIncomingResolvedTank && incomingResolvedTank !== prevState.tank;
       const hasFreshMainTankData = hasFreshMainTankTimestamp || hasTankValueChanged;
       const hasFreshFireData = incomingFireDataAt !== null && incomingFireDataAt !== lastFireDataAtRef.current;
 
@@ -617,7 +625,9 @@ const AgricultureDashboard = () => {
 
       const mergedState = {
         ...prevState,
-        tank: isResetSequenceActive ? prevState.tank : (hasFreshMainTankData ? (incomingTank ?? prevState.tank) : prevState.tank),
+        tank: isResetSequenceActive
+          ? prevState.tank
+          : (hasFreshMainTankData && hasIncomingResolvedTank ? incomingResolvedTank : prevState.tank),
         tankSensor: {
           ...prevState.tankSensor,
           ...(payloadState.tankSensor || {}),
@@ -742,6 +752,10 @@ const AgricultureDashboard = () => {
   }, []);
 
   useEffect(() => {
+    if (isDashboardFrozen) {
+      return undefined;
+    }
+
     let isCancelled = false;
 
     const refreshFromServer = async () => {
@@ -771,9 +785,13 @@ const AgricultureDashboard = () => {
       isCancelled = true;
       window.clearInterval(intervalId);
     };
-  }, []);
+  }, [isDashboardFrozen]);
 
   useEffect(() => {
+    if (isDashboardFrozen) {
+      return undefined;
+    }
+
     let isCancelled = false;
 
     const refreshDistance = async () => {
@@ -793,6 +811,14 @@ const AgricultureDashboard = () => {
         setDistanceCm(parsedDistance);
         setDistanceError('');
         setDistanceLastUpdatedAt(Date.now());
+
+        if (parsedDistance > DISTANCE_FREEZE_THRESHOLD_CM) {
+          setIsDashboardFrozen(true);
+          if (!freezeAlertShownRef.current) {
+            freezeAlertShownRef.current = true;
+            window.alert(`ALERT: Distance is ${parsedDistance.toFixed(2)} cm (greater than ${DISTANCE_FREEZE_THRESHOLD_CM} cm). Dashboard is now frozen.`);
+          }
+        }
       } catch (error) {
         if (!isCancelled) {
           setDistanceError(error.message);
@@ -807,7 +833,7 @@ const AgricultureDashboard = () => {
       isCancelled = true;
       window.clearInterval(intervalId);
     };
-  }, []);
+  }, [isDashboardFrozen]);
 
   useEffect(() => {
     const updateLayout = () => {
@@ -1879,6 +1905,40 @@ const AgricultureDashboard = () => {
           overflow: hidden;
         }
 
+        .dashboard-freeze-overlay {
+          position: absolute;
+          inset: 0;
+          z-index: 9000;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          background: rgba(15, 23, 42, 0.72);
+          backdrop-filter: blur(2px);
+        }
+
+        .dashboard-freeze-card {
+          width: min(640px, 92vw);
+          padding: 22px 24px;
+          border-radius: 16px;
+          border: 1px solid rgba(248, 113, 113, 0.55);
+          background: linear-gradient(180deg, #fff7ed 0%, #fee2e2 100%);
+          box-shadow: 0 14px 30px rgba(15, 23, 42, 0.3);
+          color: #7f1d1d;
+          text-align: center;
+        }
+
+        .dashboard-freeze-title {
+          font-size: 28px;
+          font-weight: 900;
+          margin-bottom: 8px;
+        }
+
+        .dashboard-freeze-body {
+          font-size: 21px;
+          font-weight: 700;
+          line-height: 1.4;
+        }
+
         .dash {
           width: 100%;
           min-width: 100%;
@@ -2780,11 +2840,24 @@ const AgricultureDashboard = () => {
         </div>
       ) : null}
 
+      {isDashboardFrozen ? (
+        <div className="dashboard-freeze-overlay" role="alert" aria-live="assertive">
+          <div className="dashboard-freeze-card">
+            <div className="dashboard-freeze-title">Distance Alert Triggered</div>
+            <div className="dashboard-freeze-body">
+              Distance {distanceCm === null ? 'N/A' : `${distanceCm.toFixed(2)} cm`} is greater than {DISTANCE_FREEZE_THRESHOLD_CM} cm.
+              Dashboard controls are frozen.
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       <div
         className="dash-frame"
         style={{
           width: '100%',
           height: '100%',
+          pointerEvents: isDashboardFrozen ? 'none' : 'auto',
         }}
       >
         <div
