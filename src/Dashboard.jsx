@@ -17,6 +17,14 @@ const ESP32_DISTANCE_ENDPOINT = `${API_BASE}/distance`;
 const DRAG_COMMIT_INTERVAL_MS = 30;
 const GREENHOUSE_FAN_TEMP_THRESHOLD = 40;
 const GREENHOUSE_FAN_HUMIDITY_THRESHOLD = 70;
+const GREENHOUSE_LOOP_TEMP_MIN = 35;
+const GREENHOUSE_LOOP_TEMP_MAX = 45;
+const GREENHOUSE_LOOP_HUMIDITY_MIN = 65;
+const GREENHOUSE_LOOP_HUMIDITY_MAX = 75;
+const GREENHOUSE_LOOP_HALF_CYCLE_MS = 60000;
+const GREENHOUSE_LOOP_TICK_MS = 2000;
+const GREENHOUSE_LOOP_STEPS = Math.max(1, Math.round(GREENHOUSE_LOOP_HALF_CYCLE_MS / GREENHOUSE_LOOP_TICK_MS));
+const GREENHOUSE_TEMP_STEP_PER_TICK = (GREENHOUSE_LOOP_TEMP_MAX - GREENHOUSE_LOOP_TEMP_MIN) / GREENHOUSE_LOOP_STEPS;
 const MAIN_TANK_CAPACITY_ML = 500;
 const MAIN_TANK_REFILL_START_PERCENT = 20;
 const MAIN_TANK_FLOW_REDUCE_PERCENT = 80;
@@ -38,6 +46,45 @@ const getGreenhouseFanState = (greenhouse = {}) => (
   Number(greenhouse.temp ?? 0) > GREENHOUSE_FAN_TEMP_THRESHOLD
   && Number(greenhouse.humidity ?? 0) > GREENHOUSE_FAN_HUMIDITY_THRESHOLD
 );
+const getCoupledHumidityFromTemp = (temp) => {
+  const tempProgress = clampValue(
+    (Number(temp ?? GREENHOUSE_LOOP_TEMP_MIN) - GREENHOUSE_LOOP_TEMP_MIN)
+      / (GREENHOUSE_LOOP_TEMP_MAX - GREENHOUSE_LOOP_TEMP_MIN),
+    0,
+    1,
+  );
+  return Number((
+    GREENHOUSE_LOOP_HUMIDITY_MIN
+    + (tempProgress * (GREENHOUSE_LOOP_HUMIDITY_MAX - GREENHOUSE_LOOP_HUMIDITY_MIN))
+  ).toFixed(1));
+};
+const advanceGreenhouseLoop = (greenhouse = {}, direction = 1) => {
+  const currentTemp = Number(greenhouse.temp ?? GREENHOUSE_LOOP_TEMP_MIN);
+  let nextDirection = direction >= 0 ? 1 : -1;
+  let nextTemp = currentTemp + (nextDirection * GREENHOUSE_TEMP_STEP_PER_TICK);
+
+  if (nextTemp >= GREENHOUSE_LOOP_TEMP_MAX) {
+    nextTemp = GREENHOUSE_LOOP_TEMP_MAX;
+    nextDirection = -1;
+  } else if (nextTemp <= GREENHOUSE_LOOP_TEMP_MIN) {
+    nextTemp = GREENHOUSE_LOOP_TEMP_MIN;
+    nextDirection = 1;
+  }
+
+  const normalizedTemp = Number(nextTemp.toFixed(1));
+  const nextHumidity = getCoupledHumidityFromTemp(normalizedTemp);
+  const nextGreenhouse = {
+    ...greenhouse,
+    temp: normalizedTemp,
+    humidity: nextHumidity,
+  };
+  nextGreenhouse.fanOn = getGreenhouseFanState(nextGreenhouse);
+
+  return {
+    nextGreenhouse,
+    nextDirection,
+  };
+};
 const getDashboardStateFromPayload = (payload) => (
   payload?.dashboard?.state
   ?? payload?.state
@@ -287,6 +334,7 @@ const AgricultureDashboard = () => {
   const greenhouseHoldMetricRef = useRef(null);
   const greenhouseHoldDirectionRef = useRef(0);
   const greenhouseHoldLastTouchTsRef = useRef(0);
+  const greenhouseLoopDirectionRef = useRef(1);
 
   const stopResetSequence = () => {
     if (resetReleaseTimeoutRef.current !== null) {
@@ -424,13 +472,21 @@ const AgricultureDashboard = () => {
 
     setState((prev) => {
       const currentGreenhouse = prev.gh;
-      const nextGreenhouse = { ...currentGreenhouse };
+      const step = metric === 'humidity' ? 1 : 1;
+      const nextTemp = clampValue(
+        Number((Number(currentGreenhouse.temp ?? GREENHOUSE_LOOP_TEMP_MIN) + (direction * step)).toFixed(1)),
+        GREENHOUSE_LOOP_TEMP_MIN,
+        GREENHOUSE_LOOP_TEMP_MAX,
+      );
+      const nextGreenhouse = {
+        ...currentGreenhouse,
+        temp: nextTemp,
+        humidity: getCoupledHumidityFromTemp(nextTemp),
+      };
 
-      if (metric === 'temp') {
-        nextGreenhouse.temp = clampValue(Number((currentGreenhouse.temp + direction).toFixed(1)), 20, 60);
-      } else if (metric === 'humidity') {
-        nextGreenhouse.humidity = clampValue(currentGreenhouse.humidity + (direction * 2), 30, 95);
-      }
+      greenhouseLoopDirectionRef.current = direction >= 0 ? 1 : -1;
+      if (nextTemp >= GREENHOUSE_LOOP_TEMP_MAX) greenhouseLoopDirectionRef.current = -1;
+      if (nextTemp <= GREENHOUSE_LOOP_TEMP_MIN) greenhouseLoopDirectionRef.current = 1;
 
       nextGreenhouse.fanOn = getGreenhouseFanState(nextGreenhouse);
 
@@ -512,10 +568,12 @@ const AgricultureDashboard = () => {
     activeEditFieldsRef.current = {};
     manualIrrigationOverrideRef.current = {};
     dirtyFieldsRef.current = { f1: true, f2: true, f3: true };
+    dirtyGreenhouseRef.current = true;
     dirtyMainTankRef.current = true;
     lastQueuedPayloadRef.current = {};
     isResetSequenceRef.current = true;
     resetHoldUntilRef.current = Date.now() + RESET_HOLD_MS;
+    greenhouseLoopDirectionRef.current = 1;
     setState({
       ...ZERO_DASHBOARD_STATE,
       tank: 0,
@@ -718,6 +776,35 @@ const AgricultureDashboard = () => {
 
     return () => {
       isCancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, []);
+
+  useEffect(() => {
+    const intervalId = window.setInterval(() => {
+      if (isResetSequenceRef.current && Date.now() < resetHoldUntilRef.current) {
+        return;
+      }
+
+      lastLocalUpdateRef.current = Date.now();
+      dirtyGreenhouseRef.current = true;
+
+      setState((prev) => {
+        const { nextGreenhouse, nextDirection } = advanceGreenhouseLoop(
+          prev.gh,
+          greenhouseLoopDirectionRef.current,
+        );
+
+        greenhouseLoopDirectionRef.current = nextDirection;
+
+        return {
+          ...prev,
+          gh: nextGreenhouse,
+        };
+      });
+    }, GREENHOUSE_LOOP_TICK_MS);
+
+    return () => {
       window.clearInterval(intervalId);
     };
   }, []);
