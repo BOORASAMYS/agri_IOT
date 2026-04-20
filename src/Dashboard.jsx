@@ -782,6 +782,10 @@ const AgricultureDashboard = () => {
 
   useEffect(() => {
     const intervalId = window.setInterval(() => {
+      if (isAutomationEnabled) {
+        return;
+      }
+
       if (isResetSequenceRef.current && Date.now() < resetHoldUntilRef.current) {
         return;
       }
@@ -807,7 +811,7 @@ const AgricultureDashboard = () => {
     return () => {
       window.clearInterval(intervalId);
     };
-  }, []);
+  }, [isAutomationEnabled]);
 
   useEffect(() => {
     let isCancelled = false;
