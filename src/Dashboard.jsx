@@ -1917,7 +1917,7 @@ const AgricultureDashboard = () => {
 
         .dash {
           width: 100%;
-          min-width: 1480px;
+          min-width: 100%;
           max-width: 100%;
           margin: 0;
         }
@@ -2952,15 +2952,6 @@ const AgricultureDashboard = () => {
             <div style={{ marginTop: '14px', borderTop: '0.5px solid #f1f5f9', paddingTop: '8px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
               <div className="stat-row"><span style={{ fontSize: '24px', fontWeight: 700, color: '#64748b' }}>Flow rate</span><span style={{ fontSize: '26px', fontWeight: 500, color: '#0369a1' }}>{state.flowRate.toFixed(1)} L/min</span></div>
               <div className="stat-row"><span style={{ fontSize: '24px', fontWeight: 700, color: '#64748b' }}>Fill time</span><span style={{ fontSize: '26px', fontWeight: 500, color: '#0369a1' }}>{MAIN_TANK_FILL_TIME_MINUTES} min</span></div>
-              <div className="stat-row">
-                <span style={{ fontSize: '24px', fontWeight: 700, color: '#64748b' }}>Distance</span>
-                <span style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '4px', textAlign: 'right' }}>
-                  <span style={{ fontSize: '26px', fontWeight: 500, color: distanceError ? '#dc2626' : '#0369a1' }}>{distanceDisplay}</span>
-                  <span className="badge" style={{ fontSize: '14px', background: distanceError ? '#fee2e2' : '#dcfce7', color: distanceError ? '#b91c1c' : '#166534' }}>{distanceSensorStatus}</span>
-                  {distanceError ? <span style={{ fontSize: '12px', color: '#b91c1c' }}>{distanceError}</span> : null}
-                  {!distanceError && distanceUpdatedLabel ? <span style={{ fontSize: '12px', color: '#64748b' }}>Updated {distanceUpdatedLabel}</span> : null}
-                </span>
-              </div>
               <div className="stat-row" style={{ border: 'none' }}><span style={{ fontSize: '24px', fontWeight: 700, color: '#64748b' }}>Pump status</span><span className="badge" style={{ fontSize: '26px', background: state.pumping ? '#dbeafe' : '#f1f5f9', color: state.pumping ? '#1e40af' : '#475569' }}>{state.pumping ? 'Active' : 'Idle'}</span></div>
             </div>
           </div>

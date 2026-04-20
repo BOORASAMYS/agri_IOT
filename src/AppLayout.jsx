@@ -72,8 +72,7 @@ const AppLayout = () => {
           overflow-y: hidden;
           height: 100vh;
           min-height: 100vh;
-          padding-left: 0;
-          padding-right: 0;
+          padding: 0;
         }
 
         .app-viewport.dashboard-page .content-wrapper.dashboard-wrapper {
