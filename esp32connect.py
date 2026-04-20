@@ -30,6 +30,8 @@ GREENHOUSE_FAN_TEMP_THRESHOLD = 40.0
 GREENHOUSE_FAN_HUMIDITY_THRESHOLD = 70.0
 GREENHOUSE_TEMP_MIN = 20.0
 GREENHOUSE_TEMP_OFF_STEP_PER_TICK = 0.5
+AUTOMATION_GREENHOUSE_ALERT_INTERVAL_SECONDS = 120.0
+AUTOMATION_GREENHOUSE_ALERT_DURATION_SECONDS = 5.0
 SIMULATION_TICK_SECONDS = 1.2
 MOISTURE_AUTO_IRRIGATION_DURATION_SECONDS = 120.0
 AUTOMATION_STARTUP_RESET_SECONDS = 5.0
@@ -57,11 +59,13 @@ DEFAULT_STATE = {
             "humidity": 65.0,
             "fireAlert": False,
             "fireSensor": {
+                "detected": False,
                 "online": False,
                 "lastUpdatedAt": None,
                 "raw": "",
                 "error": "Farmhouse fire sensor not initialized",
             },
+            "automationFirePulseActive": False,
         },
         "f1": {
             "moisture": 0.0,
@@ -289,6 +293,21 @@ def is_automation_reset_active(now=None):
     return AUTOMATION_RESET_UNTIL is not None and now < AUTOMATION_RESET_UNTIL
 
 
+def is_automation_greenhouse_alert_active(now=None):
+    if now is None:
+        now = time.time()
+
+    if AUTOMATION_CYCLE_STARTED_AT is None or now < AUTOMATION_CYCLE_STARTED_AT:
+        return False
+
+    elapsed = now - AUTOMATION_CYCLE_STARTED_AT
+    if elapsed < AUTOMATION_GREENHOUSE_ALERT_INTERVAL_SECONDS:
+        return False
+
+    cycle_position = elapsed % AUTOMATION_GREENHOUSE_ALERT_INTERVAL_SECONDS
+    return cycle_position < AUTOMATION_GREENHOUSE_ALERT_DURATION_SECONDS
+
+
 def reset_state_for_automation_start(now=None):
     global AUTOMATION_CYCLE_STARTED_AT
     global AUTOMATION_RESET_UNTIL
@@ -301,6 +320,9 @@ def reset_state_for_automation_start(now=None):
     state["pumping"] = False
     state["mainTankManualOverride"] = False
     state["flowRate"] = 0.0
+    greenhouse = state.get("gh")
+    if isinstance(greenhouse, dict):
+        greenhouse["automationFirePulseActive"] = False
 
     for field_key in FIELD_KEYS:
         field = state.get(field_key)
@@ -340,6 +362,9 @@ def set_automation_enabled(enabled):
             CURRENT["state"]["pumping"] = False
             CURRENT["state"]["mainTankManualOverride"] = False
             CURRENT["state"]["flowRate"] = 0.0
+            greenhouse = CURRENT.get("state", {}).get("gh")
+            if isinstance(greenhouse, dict):
+                greenhouse["automationFirePulseActive"] = False
             for field_key in FIELD_KEYS:
                 field = CURRENT.get("state", {}).get(field_key)
                 if not isinstance(field, dict):
@@ -422,14 +447,14 @@ def get_irrigation_moisture_target(field_key, field, now):
     return round(max(current_moisture, min(target_moisture, planned_moisture)), 1)
 
 
-def apply_greenhouse_rules(state):
+def apply_greenhouse_rules(state, force_fan_on=False):
     greenhouse = state.get("state", {}).get("gh")
     if not isinstance(greenhouse, dict):
         return state
 
     temp = number_from_value(greenhouse.get("temp"), GREENHOUSE_FAN_TEMP_THRESHOLD)
     humidity = number_from_value(greenhouse.get("humidity"), GREENHOUSE_FAN_HUMIDITY_THRESHOLD)
-    greenhouse["fanOn"] = (
+    greenhouse["fanOn"] = force_fan_on or (
         temp > GREENHOUSE_FAN_TEMP_THRESHOLD
         and humidity > GREENHOUSE_FAN_HUMIDITY_THRESHOLD
     )
@@ -910,17 +935,24 @@ def simulation_loop():
             dirty = False
             now = time.time()
             automation_reset_active = automation_enabled and is_automation_reset_active(now)
+            greenhouse_pulse_active = automation_enabled and is_automation_greenhouse_alert_active(now)
             greenhouse = CURRENT.get("state", {}).get("gh")
             active_irrigation_count = 0
             if automation_enabled and isinstance(greenhouse, dict):
-                apply_greenhouse_rules(CURRENT)
+                previous_fan_on = bool_from_value(greenhouse.get("fanOn"))
+                apply_greenhouse_rules(CURRENT, force_fan_on=greenhouse_pulse_active)
+                if bool_from_value(greenhouse.get("fanOn")) != previous_fan_on:
+                    dirty = True
                 if bool_from_value(greenhouse.get("fanOn")):
                     current_temp = number_from_value(greenhouse.get("temp"), GREENHOUSE_TEMP_MIN)
                     next_temp = round(max(GREENHOUSE_TEMP_MIN, current_temp - GREENHOUSE_TEMP_OFF_STEP_PER_TICK), 1)
                     if next_temp != current_temp:
                         greenhouse["temp"] = next_temp
                         dirty = True
-                apply_greenhouse_rules(CURRENT)
+                previous_fan_on = bool_from_value(greenhouse.get("fanOn"))
+                apply_greenhouse_rules(CURRENT, force_fan_on=greenhouse_pulse_active)
+                if bool_from_value(greenhouse.get("fanOn")) != previous_fan_on:
+                    dirty = True
 
             for field_key in FIELD_KEYS:
                 field = CURRENT.get("state", {}).get(field_key)
@@ -1035,6 +1067,11 @@ def simulation_loop():
                     clear_irrigation_run(field_key)
 
             if automation_enabled and isinstance(greenhouse, dict):
+                previous_pulse_state = bool_from_value(greenhouse.get("automationFirePulseActive"))
+                if previous_pulse_state != greenhouse_pulse_active:
+                    greenhouse["automationFirePulseActive"] = greenhouse_pulse_active
+                    dirty = True
+
                 target_temp = 31.0 if CURRENT["state"].get("pumping") else 38.0
                 temp_step = 0.4 if CURRENT["state"].get("pumping") else 0.3
                 current_temp = number_from_value(greenhouse.get("temp"), 0.0)
@@ -1057,13 +1094,19 @@ def simulation_loop():
                     greenhouse["humidity"] = next_humidity
                     dirty = True
 
-                next_fire_alert = bool_from_value(greenhouse.get("fireAlert")) or number_from_value(greenhouse.get("temp"), 0.0) >= 52.0
+                fire_sensor = greenhouse.get("fireSensor", {})
+                sensor_fire_alert = bool_from_value(fire_sensor.get("detected")) if isinstance(fire_sensor, dict) else False
+                next_fire_alert = (
+                    sensor_fire_alert
+                    or greenhouse_pulse_active
+                    or number_from_value(greenhouse.get("temp"), 0.0) >= 52.0
+                )
                 if bool_from_value(greenhouse.get("fireAlert")) != next_fire_alert:
                     greenhouse["fireAlert"] = next_fire_alert
                     dirty = True
 
             if dirty:
-                apply_greenhouse_rules(CURRENT)
+                apply_greenhouse_rules(CURRENT, force_fan_on=greenhouse_pulse_active)
                 if automation_reset_active:
                     CURRENT["state"]["pumping"] = False
                     CURRENT["state"]["mainTankManualOverride"] = False

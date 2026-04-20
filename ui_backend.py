@@ -874,6 +874,7 @@ class FarmhouseFireSensorWorker:
                     "gh": {
                         "fireAlert": fire_alert,
                         "fireSensor": {
+                            "detected": fire_alert,
                             "online": True,
                             "lastUpdatedAt": measured_at,
                             "raw": raw_value,
@@ -932,6 +933,7 @@ class FarmhouseFireSensorWorker:
                         "state": {
                             "gh": {
                                 "fireSensor": {
+                                    "detected": False,
                                     "online": False,
                                     "lastUpdatedAt": None,
                                     "raw": "",
