@@ -947,7 +947,8 @@ const AgricultureDashboard = () => {
         setDistanceLastUpdatedAt(Date.now());
 
         if (parsedDistance > RESERVOIR_EMPTY_THRESHOLD_CM) {
-          setIsReservoirAlertVisible((prev) => prev || !isDashboardFrozen);
+          setIsReservoirAlertVisible(true);
+          setIsDashboardFrozen(true);
         } else if (parsedDistance < RESERVOIR_EMPTY_THRESHOLD_CM) {
           setIsReservoirAlertVisible(false);
           setIsDashboardFrozen(false);
@@ -2148,7 +2149,7 @@ const AgricultureDashboard = () => {
 
         .reservoir-alert-body {
           font-size: 18px;
-          font-weight: 700;
+          font-weight: 400;
           line-height: 1.35;
         }
 
@@ -2731,23 +2732,7 @@ const AgricultureDashboard = () => {
           gap: 12px;
         }
         .moisture-step-btn {
-          width: 35px;
-          height: 35px;
-          border: none;
-          border-radius: 999px;
-          background: linear-gradient(180deg, #f8fbff 0%, #edf4ff 100%);
-          color: #0f172a;
-          font-size: 40px;
-          font-weight: 800;
-          line-height: 1;
-          display: inline-flex;
-          align-items: center;
-          justify-content: center;
-          cursor: pointer;
-          touch-action: none;
-          user-select: none;
-          box-shadow: 0 4px 10px rgba(59, 130, 246, 0.14);
-          transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+          display: none;
         }
         .moisture-step-btn:hover {
           transform: translateY(-1px);
@@ -3086,27 +3071,7 @@ const AgricultureDashboard = () => {
         <div className="reservoir-alert-popup" role="alertdialog" aria-live="assertive" aria-modal="true">
           <div className="reservoir-alert-title">Reservoir Is Empty</div>
           <div className="reservoir-alert-body">
-            Reservoir is empty.
-            Click OK to freeze the website until the reservoir is refilled.
-          </div>
-          <div className="reservoir-alert-actions">
-            <button
-              type="button"
-              className="reservoir-alert-ok"
-              onClick={() => {
-                setIsReservoirAlertVisible(false);
-                if (distanceCm !== null && distanceCm > RESERVOIR_EMPTY_THRESHOLD_CM) {
-                  frozenMotorSnapshotRef.current = createMotorSnapshot(
-                    state,
-                    isAutomationEnabled,
-                    manualIrrigationOverrideRef.current,
-                  );
-                  setIsDashboardFrozen(true);
-                }
-              }}
-            >
-              OK
-            </button>
+            <strong>The Reservoir is Empty</strong>
           </div>
         </div>
       ) : null}
