@@ -1,0 +1,55 @@
+#include <WiFi.h>
+#include <WebServer.h>
+
+const char* ssid = "STIC";
+const char* password = "stic@123";
+
+WebServer server(80);
+
+#define LED_PIN 2
+
+// 🔥 Static IP settings
+IPAddress local_IP(172, 16, 127, 202);   // choose free IP
+IPAddress gateway(172, 16, 124, 1);      // from ipconfig
+IPAddress subnet(255, 255, 252, 0);
+
+void handleON() {
+  digitalWrite(LED_PIN, HIGH);
+  server.send(200, "text/plain", "LED ON");
+}
+
+void handleOFF() {
+  digitalWrite(LED_PIN, LOW);
+  server.send(200, "text/plain", "LED OFF");
+}
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(LED_PIN, OUTPUT);
+
+  // 🔥 Apply static IP BEFORE connecting
+  if (!WiFi.config(local_IP, gateway, subnet)) {
+    Serial.println("Static IP Failed");
+  }
+
+  WiFi.begin(ssid, password);
+
+  Serial.print("Connecting");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("\nConnected!");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+
+  server.on("/on", handleON);
+  server.on("/off", handleOFF);
+
+  server.begin();
+}
+
+void loop() {
+  server.handleClient();
+}
