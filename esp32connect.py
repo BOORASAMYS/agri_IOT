@@ -20,6 +20,7 @@ DEFAULT_DEVICE_IP = "192.168.0.20"
 IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD = 30.0
 IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD = 60.0
 IRRIGATION_PH_TARGET = 7.0
+FIELD_KEYS_WITH_PH_CONDITION = {"f1", "f2"}
 IRRIGATION_PH_TOLERANCE = 0.05
 IRRIGATION_LOW_PH_THRESHOLD = 4.0
 IRRIGATION_HIGH_PH_THRESHOLD = 10.0
@@ -184,7 +185,17 @@ def ph_to_moisture(ph):
     return round((normalized_ph / 7.0) * 60.0, 1)
 
 
-def normalize_linked_field_values(field_patch, preferred_source=None):
+def field_supports_ph_condition(field_key):
+    return field_key in FIELD_KEYS_WITH_PH_CONDITION
+
+
+def apply_field_ph_condition(field_key, field):
+    if field_supports_ph_condition(field_key):
+        field.update(get_ph_chemical_state(field.get("ph")))
+    return field
+
+
+def normalize_linked_field_values(field_patch, preferred_source=None, field_key=None):
     normalized_patch = dict(field_patch or {})
     if preferred_source is None:
         if "moisture" in normalized_patch:
@@ -199,13 +210,14 @@ def normalize_linked_field_values(field_patch, preferred_source=None):
         normalized_patch["moisture"] = water_level_to_moisture(normalized_patch["wl"])
         normalized_patch["ph"] = moisture_to_ph(normalized_patch["moisture"])
     elif preferred_source == "ph" and "ph" in normalized_patch:
-        normalized_patch["ph"] = max(0.0, min(7.0, number_from_value(normalized_patch["ph"], IRRIGATION_PH_TARGET)))
-        normalized_patch["moisture"] = ph_to_moisture(normalized_patch["ph"])
-        normalized_patch["wl"] = moisture_to_water_level(normalized_patch["moisture"])
+        normalized_patch["ph"] = round(max(0.0, min(14.0, number_from_value(normalized_patch["ph"], IRRIGATION_PH_TARGET))), 2)
     elif "moisture" in normalized_patch:
         normalized_patch["moisture"] = max(0.0, min(100.0, number_from_value(normalized_patch["moisture"], 0.0)))
         normalized_patch["wl"] = moisture_to_water_level(normalized_patch["moisture"])
         normalized_patch["ph"] = moisture_to_ph(normalized_patch["moisture"])
+
+    if "ph" in normalized_patch:
+        apply_field_ph_condition(field_key, normalized_patch)
 
     return normalized_patch
 
@@ -275,6 +287,10 @@ def should_auto_irrigate(field_key, field):
 def can_start_irrigation(field_key, field):
     should_irrigate, _ = resolve_auto_irrigation(field_key, field, currently_irrigating=False)
     return should_irrigate
+
+
+def can_resume_irrigation_until_cutoff(field):
+    return number_from_value(field.get("moisture"), 0.0) < IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD
 
 
 def get_irrigation_reason(field_key, field):
@@ -470,7 +486,7 @@ def initialize_irrigation_runtime(state):
         LOW_MOISTURE_LATCHES[field_key] = False
         PH_CONTROL_LATCHES[field_key] = False
         MANUAL_IRRIGATION_OVERRIDES[field_key] = None
-        field.update(get_ph_chemical_state(field.get("ph")))
+        apply_field_ph_condition(field_key, field)
         field["irrigation"] = can_start_irrigation(field_key, field)
 
         if field["irrigation"]:
@@ -639,7 +655,7 @@ def apply_status_payload(payload):
             if key in incoming:
                 field_patch[key] = number_from_value(incoming[key], CURRENT["state"][field_key][key])
         if any(key in field_patch for key in ("moisture", "ph", "wl")):
-            field_patch = normalize_linked_field_values(field_patch)
+            field_patch = normalize_linked_field_values(field_patch, field_key=field_key)
         for key in ("irrigation", "drain", "acid", "base"):
             if key in incoming:
                 field_patch[key] = bool_from_value(incoming[key])
@@ -774,7 +790,7 @@ def normalize_field_body(field_key, body):
 
     preferred_source = "moisture" if moisture_updated else "wl" if water_level_updated else "ph" if ph_updated else None
     if preferred_source:
-        field_patch = normalize_linked_field_values(field_patch, preferred_source=preferred_source)
+        field_patch = normalize_linked_field_values(field_patch, preferred_source=preferred_source, field_key=field_key)
         for linked_key in ("moisture", "wl", "ph"):
             if linked_key in field_patch:
                 device_payload[linked_key] = field_patch[linked_key]
@@ -838,7 +854,7 @@ def update_current(patch, connected=None, last_error=None, field_metadata=None):
             moisture_position_updated = any(key in field_patch for key in ("moisture", "wl", "ph"))
 
             if sensor_update_present:
-                normalized_field_patch = normalize_linked_field_values(field_patch)
+                normalized_field_patch = normalize_linked_field_values(field_patch, field_key=field_key)
                 if normalized_field_patch != field_patch:
                     field.update(normalized_field_patch)
                     field_patch = normalized_field_patch
@@ -852,7 +868,7 @@ def update_current(patch, connected=None, last_error=None, field_metadata=None):
                 LOW_MOISTURE_LATCHES[field_key] = False
                 PH_CONTROL_LATCHES[field_key] = False
                 field["irrigation"] = False
-                field.update(get_ph_chemical_state(field.get("ph")))
+                apply_field_ph_condition(field_key, field)
                 clear_irrigation_run(field_key)
                 continue
 
@@ -867,7 +883,7 @@ def update_current(patch, connected=None, last_error=None, field_metadata=None):
             if metadata.get("manual_irrigation_control") and "irrigation" in field_patch:
                 requested_manual_irrigation = bool_from_value(field_patch.get("irrigation"))
                 if requested_manual_irrigation:
-                    MANUAL_IRRIGATION_OVERRIDES[field_key] = True if can_start_irrigation(field_key, field) else None
+                    MANUAL_IRRIGATION_OVERRIDES[field_key] = True if can_resume_irrigation_until_cutoff(field) else None
                     if MANUAL_IRRIGATION_OVERRIDES[field_key] is None:
                         field["irrigation"] = False
                 else:
@@ -897,7 +913,7 @@ def update_current(patch, connected=None, last_error=None, field_metadata=None):
 
             LOW_MOISTURE_LATCHES[field_key] = desired_auto_reason == "moisture"
             PH_CONTROL_LATCHES[field_key] = desired_auto_reason == "ph"
-            field.update(get_ph_chemical_state(field.get("ph")))
+            apply_field_ph_condition(field_key, field)
 
             if field["irrigation"]:
                 set_irrigation_run(field_key, desired_auto_reason or "manual", field, now=now)
@@ -1037,7 +1053,7 @@ def simulation_loop():
                     clear_irrigation_run(field_key)
                     LOW_MOISTURE_LATCHES[field_key] = False
                     PH_CONTROL_LATCHES[field_key] = False
-                    field.update(get_ph_chemical_state(field.get("ph")))
+                    apply_field_ph_condition(field_key, field)
                     continue
 
                 if automation_enabled:
@@ -1059,7 +1075,7 @@ def simulation_loop():
 
                 LOW_MOISTURE_LATCHES[field_key] = desired_auto_reason == "moisture"
                 PH_CONTROL_LATCHES[field_key] = desired_auto_reason == "ph"
-                field.update(get_ph_chemical_state(field.get("ph")))
+                apply_field_ph_condition(field_key, field)
 
                 if should_irrigate:
                     set_irrigation_run(field_key, desired_auto_reason or "manual", field, now=now)

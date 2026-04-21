@@ -32,17 +32,19 @@ const MAIN_TANK_FILL_TIME_MINUTES = 2;
 const AUTOMATION_TICK_MS = 1200;
 const STATUS_REFRESH_INTERVAL_MS = 500;
 const DISTANCE_REFRESH_INTERVAL_MS = 1000;
-const DISTANCE_FREEZE_THRESHOLD_CM = 1000;
+const RESERVOIR_EMPTY_THRESHOLD_CM = 10;
 const RESET_HOLD_MS = 5000;
 const IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD = 30;
 const IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD = 60;
 const MAIN_TANK_HIGH_FILL_PERCENT_PER_TICK = 2.0;
 const MAIN_TANK_LOW_FILL_PERCENT_PER_TICK = 2.0;
 const PH_TARGET = 7;
+const FIELD_KEYS_WITH_PH_CONDITION = new Set(['f1', 'f2']);
 const getPhChemicalState = (ph) => ({
   acid: ph < PH_TARGET,
   base: ph > PH_TARGET,
 });
+const fieldSupportsPhCondition = (fieldKey) => FIELD_KEYS_WITH_PH_CONDITION.has(fieldKey);
 const getGreenhouseFanState = (greenhouse = {}) => (
   Number(greenhouse.temp ?? 0) > GREENHOUSE_FAN_TEMP_THRESHOLD
   && Number(greenhouse.humidity ?? 0) > GREENHOUSE_FAN_HUMIDITY_THRESHOLD
@@ -130,7 +132,6 @@ const createInitialDashboardState = () => applyMainTankRules({
   f3: {
     ...ZERO_DASHBOARD_STATE.f3,
     irrigation: false,
-    ...getPhChemicalState(ZERO_DASHBOARD_STATE.f3.ph),
   },
   time: '',
 });
@@ -140,11 +141,12 @@ const moistureToWaterLevel = (moisture) => Number(clampValue((moisture / 100) * 
 const waterLevelToMoisture = (waterLevel) => Number(clampValue((waterLevel / 30) * 100, 0, 100).toFixed(1));
 const moistureToPh = (moisture) => Number(clampValue((Number(moisture ?? 0) / 60) * 7, 0, 7).toFixed(2));
 const phToMoisture = (ph) => Number(clampValue((Number(ph ?? PH_TARGET) / 7) * 60, 0, 60).toFixed(1));
-const normalizeLinkedFieldValues = (patch = {}, preferredSource = null) => {
+const normalizeLinkedFieldValues = (patch = {}, preferredSource = null, fieldKey = null) => {
   const nextPatch = { ...patch };
   const hasMoisture = Object.prototype.hasOwnProperty.call(nextPatch, 'moisture');
   const hasWaterLevel = Object.prototype.hasOwnProperty.call(nextPatch, 'wl');
   const hasPh = Object.prototype.hasOwnProperty.call(nextPatch, 'ph');
+  const supportsPhCondition = fieldSupportsPhCondition(fieldKey);
 
   const source = preferredSource ?? (hasMoisture ? 'moisture' : hasWaterLevel ? 'wl' : hasPh ? 'ph' : null);
 
@@ -153,9 +155,7 @@ const normalizeLinkedFieldValues = (patch = {}, preferredSource = null) => {
     nextPatch.moisture = waterLevelToMoisture(nextPatch.wl);
     nextPatch.ph = moistureToPh(nextPatch.moisture);
   } else if (source === 'ph' && hasPh) {
-    nextPatch.ph = Number(clampValue(nextPatch.ph, 0, 7).toFixed(2));
-    nextPatch.moisture = phToMoisture(nextPatch.ph);
-    nextPatch.wl = moistureToWaterLevel(nextPatch.moisture);
+    nextPatch.ph = Number(clampValue(nextPatch.ph, 0, 14).toFixed(2));
   } else if (hasMoisture) {
     const normalizedMoisture = Number(clampValue(nextPatch.moisture, 0, 100).toFixed(1));
     nextPatch.moisture = normalizedMoisture;
@@ -164,12 +164,14 @@ const normalizeLinkedFieldValues = (patch = {}, preferredSource = null) => {
   }
 
   if (Object.prototype.hasOwnProperty.call(nextPatch, 'ph')) {
-    Object.assign(nextPatch, getPhChemicalState(nextPatch.ph));
+    if (supportsPhCondition) {
+      Object.assign(nextPatch, getPhChemicalState(nextPatch.ph));
+    }
   }
 
   return nextPatch;
 };
-const canFieldStartIrrigation = (fieldKey, field) => shouldFieldIrrigate(fieldKey, field, false);
+const canFieldStartIrrigation = (fieldKey, field) => Number(field?.moisture ?? 0) < IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD;
 const shouldFieldIrrigate = (fieldKey, field, wasIrrigating = false) => {
   const moisture = Number(field?.moisture ?? 0);
   if (moisture >= IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD) return false;
@@ -190,12 +192,12 @@ const applyMainTankRules = (nextState, previousState = nextState) => {
   const manualOverride = typeof nextState.mainTankManualOverride === 'boolean'
     ? nextState.mainTankManualOverride
     : previousState?.mainTankManualOverride;
-  const pumping = tank < MAIN_TANK_REFILL_START_PERCENT
-    ? true
-    : tank >= 100
-      ? false
-      : typeof manualOverride === 'boolean'
-        ? manualOverride
+  const pumping = typeof manualOverride === 'boolean'
+    ? manualOverride
+    : tank < MAIN_TANK_REFILL_START_PERCENT
+      ? true
+      : tank >= 100
+        ? false
         : isMainTankPumpOn(tank, previousPumping);
   const refillPercentPerTick = pumping
     ? (tank >= MAIN_TANK_FLOW_REDUCE_PERCENT ? MAIN_TANK_LOW_FILL_PERCENT_PER_TICK : MAIN_TANK_HIGH_FILL_PERCENT_PER_TICK)
@@ -208,6 +210,93 @@ const applyMainTankRules = (nextState, previousState = nextState) => {
     pumping,
     flowRate: Number(percentPerTickToLitersPerMinute(refillPercentPerTick).toFixed(1)),
   };
+};
+const forceAllMotorsOff = (currentState) => ({
+  ...currentState,
+  pumping: false,
+  mainTankManualOverride: false,
+  flowRate: 0,
+  gh: {
+    ...currentState.gh,
+    fanOn: false,
+  },
+  f1: {
+    ...currentState.f1,
+    irrigation: false,
+    drain: false,
+  },
+  f2: {
+    ...currentState.f2,
+    irrigation: false,
+    drain: false,
+  },
+  f3: {
+    ...currentState.f3,
+    irrigation: false,
+    drain: false,
+  },
+});
+const createMotorSnapshot = (currentState, automationEnabled, manualIrrigationOverrides = {}) => ({
+  automationEnabled: Boolean(automationEnabled),
+  mainTank: {
+    pumping: Boolean(currentState.pumping),
+    mainTankManualOverride: currentState.mainTankManualOverride ?? null,
+  },
+  greenhouse: {
+    fanOn: Boolean(currentState.gh?.fanOn),
+  },
+  fields: {
+    f1: {
+      irrigation: Boolean(currentState.f1?.irrigation),
+      drain: Boolean(currentState.f1?.drain),
+      manualOverride: manualIrrigationOverrides.f1,
+    },
+    f2: {
+      irrigation: Boolean(currentState.f2?.irrigation),
+      drain: Boolean(currentState.f2?.drain),
+      manualOverride: manualIrrigationOverrides.f2,
+    },
+    f3: {
+      irrigation: Boolean(currentState.f3?.irrigation),
+      drain: Boolean(currentState.f3?.drain),
+      manualOverride: manualIrrigationOverrides.f3,
+    },
+  },
+});
+const restoreMotorSnapshot = (currentState, snapshot) => {
+  if (!snapshot) {
+    return currentState;
+  }
+
+  const getRecoveredFieldState = (field) => {
+    const shouldResumeIrrigation = Number(field?.moisture ?? 0) < IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD;
+    return {
+      ...field,
+      // After unfreeze, moisture should continue rising from the current value
+      // until it reaches the 60% cutoff. Drain must stay off for that recovery run.
+      irrigation: shouldResumeIrrigation,
+      drain: false,
+    };
+  };
+
+  const nextF1 = getRecoveredFieldState(currentState.f1);
+  const nextF2 = getRecoveredFieldState(currentState.f2);
+  const nextF3 = getRecoveredFieldState(currentState.f3);
+
+  const nextState = {
+    ...currentState,
+    pumping: snapshot.mainTank?.pumping ?? currentState.pumping,
+    mainTankManualOverride: snapshot.mainTank?.mainTankManualOverride ?? currentState.mainTankManualOverride,
+    gh: {
+      ...currentState.gh,
+      fanOn: snapshot.greenhouse?.fanOn ?? currentState.gh?.fanOn,
+    },
+    f1: nextF1,
+    f2: nextF2,
+    f3: nextF3,
+  };
+
+  return applyMainTankRules(nextState, currentState);
 };
 const moveToward = (value, target, step, digits = 1) => {
   if (Math.abs(target - value) <= step) {
@@ -227,7 +316,7 @@ const moveFieldTowardTarget = (currentField, targetField) => {
     1.2,
     1,
   );
-  const linkedValues = normalizeLinkedFieldValues({ moisture: nextMoisture }, 'moisture');
+  const linkedValues = normalizeLinkedFieldValues({ moisture: nextMoisture }, 'moisture', fieldKey);
   const nextN = moveToward(Number(currentField?.n ?? 0), Number(targetField?.n ?? 0), 1, 1);
   const nextP = moveToward(Number(currentField?.p ?? 0), Number(targetField?.p ?? 0), 1, 1);
   const nextK = moveToward(Number(currentField?.k ?? 0), Number(targetField?.k ?? 0), 1, 1);
@@ -306,6 +395,7 @@ const AgricultureDashboard = () => {
   const [distanceCm, setDistanceCm] = useState(null);
   const [distanceError, setDistanceError] = useState('');
   const [distanceLastUpdatedAt, setDistanceLastUpdatedAt] = useState(null);
+  const [isReservoirAlertVisible, setIsReservoirAlertVisible] = useState(false);
   const [isDashboardFrozen, setIsDashboardFrozen] = useState(false);
 
   const [isLoadingScreenVisible, setIsLoadingScreenVisible] = useState(true);
@@ -324,6 +414,8 @@ const AgricultureDashboard = () => {
   const lastLocalUpdateRef = useRef(0);
   const activeEditFieldsRef = useRef({});
   const manualIrrigationOverrideRef = useRef({});
+  const frozenMotorSnapshotRef = useRef(null);
+  const wasDashboardFrozenRef = useRef(false);
   const resetReleaseTimeoutRef = useRef(null);
   const isResetSequenceRef = useRef(false);
   const resetHoldUntilRef = useRef(0);
@@ -344,7 +436,6 @@ const AgricultureDashboard = () => {
   const greenhouseEditReleaseTimeoutRef = useRef(null);
   const greenhouseEditLockUntilRef = useRef(0);
   const greenhouseDisplayFrameRef = useRef(null);
-  const freezeAlertShownRef = useRef(false);
 
   const stopResetSequence = () => {
     if (resetReleaseTimeoutRef.current !== null) {
@@ -400,7 +491,7 @@ const AgricultureDashboard = () => {
     setState((prev) => {
       const currentField = prev[fieldKey];
       const nextMoisture = Number(clampValue((currentField.moisture + direction), 0, 100).toFixed(1));
-      const linkedValues = normalizeLinkedFieldValues({ moisture: nextMoisture }, 'moisture');
+      const linkedValues = normalizeLinkedFieldValues({ moisture: nextMoisture }, 'moisture', fieldKey);
       const nextField = {
         ...currentField,
         ...linkedValues,
@@ -726,6 +817,18 @@ const AgricultureDashboard = () => {
   }, []);
 
   useEffect(() => {
+    dirtyFieldsRef.current.f3 = true;
+    setState((prevState) => ({
+      ...prevState,
+      f3: {
+        ...prevState.f3,
+        acid: false,
+        base: false,
+      },
+    }));
+  }, []);
+
+  useEffect(() => {
     if (!import.meta.env.DEV) return undefined;
 
     let unmounted = false;
@@ -823,10 +926,6 @@ const AgricultureDashboard = () => {
   }, [isDashboardFrozen]);
 
   useEffect(() => {
-    if (isDashboardFrozen) {
-      return undefined;
-    }
-
     let isCancelled = false;
 
     const refreshDistance = async () => {
@@ -847,12 +946,11 @@ const AgricultureDashboard = () => {
         setDistanceError('');
         setDistanceLastUpdatedAt(Date.now());
 
-        if (parsedDistance > DISTANCE_FREEZE_THRESHOLD_CM) {
-          setIsDashboardFrozen(true);
-          if (!freezeAlertShownRef.current) {
-            freezeAlertShownRef.current = true;
-            window.alert(`ALERT: Distance is ${parsedDistance.toFixed(2)} cm (greater than ${DISTANCE_FREEZE_THRESHOLD_CM} cm). Dashboard is now frozen.`);
-          }
+        if (parsedDistance > RESERVOIR_EMPTY_THRESHOLD_CM) {
+          setIsReservoirAlertVisible((prev) => prev || !isDashboardFrozen);
+        } else if (parsedDistance < RESERVOIR_EMPTY_THRESHOLD_CM) {
+          setIsReservoirAlertVisible(false);
+          setIsDashboardFrozen(false);
         }
       } catch (error) {
         if (!isCancelled) {
@@ -959,7 +1057,13 @@ const AgricultureDashboard = () => {
     : getGreenhouseFanState(state.gh);
   const fireOn = state.gh.fireAlert;
   const fireSensorStatus = fireOn ? 'Fire Detected' : 'Safe';
-  const distanceSensorStatus = distanceError ? 'Offline' : distanceCm === null ? 'Waiting' : 'Live';
+  const distanceSensorStatus = distanceError
+    ? 'Offline'
+    : distanceCm === null
+      ? 'Waiting'
+      : (isDashboardFrozen || isReservoirAlertVisible)
+        ? 'Reservoir Empty'
+        : 'Live';
   const distanceDisplay = distanceCm === null ? '—' : `${distanceCm.toFixed(2)} cm`;
   const distanceUpdatedLabel = distanceLastUpdatedAt ? new Date(distanceLastUpdatedAt).toLocaleTimeString() : '';
   const fanSpeedClass = fanOn ? "spin-med" : "spin-stop";
@@ -1083,7 +1187,7 @@ const AgricultureDashboard = () => {
   const buildGreenhousePayload = () => ({
     temp: state.gh.temp,
     humidity: state.gh.humidity,
-    fanOn: getGreenhouseFanState(state.gh),
+    fanOn: Boolean(state.gh.fanOn),
   });
 
   const buildMainTankPayload = () => ({
@@ -1235,6 +1339,49 @@ const AgricultureDashboard = () => {
     sendMainTankToServer(buildMainTankPayload());
   }, [state.tank, state.pumping, state.mainTankManualOverride]);
 
+  useEffect(() => {
+    if (isDashboardFrozen === wasDashboardFrozenRef.current) {
+      return;
+    }
+
+    wasDashboardFrozenRef.current = isDashboardFrozen;
+
+    if (!isDashboardFrozen) {
+      const frozenSnapshot = frozenMotorSnapshotRef.current;
+      if (frozenSnapshot) {
+        setIsAutomationEnabled(frozenSnapshot.automationEnabled);
+        syncAutomationState(frozenSnapshot.automationEnabled);
+        manualIrrigationOverrideRef.current = {
+          f1: Number(state.f1?.moisture ?? 0) < IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD ? true : undefined,
+          f2: Number(state.f2?.moisture ?? 0) < IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD ? true : undefined,
+          f3: Number(state.f3?.moisture ?? 0) < IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD ? true : undefined,
+        };
+        lastLocalUpdateRef.current = Date.now();
+        dirtyFieldsRef.current = { f1: true, f2: true, f3: true };
+        dirtyGreenhouseRef.current = true;
+        dirtyMainTankRef.current = true;
+        setState((prev) => restoreMotorSnapshot(prev, frozenSnapshot));
+        frozenMotorSnapshotRef.current = null;
+      }
+      return;
+    }
+
+    frozenMotorSnapshotRef.current = createMotorSnapshot(
+      state,
+      isAutomationEnabled,
+      manualIrrigationOverrideRef.current,
+    );
+    setIsAutomationEnabled(false);
+    syncAutomationState(false);
+    manualIrrigationOverrideRef.current = { f1: false, f2: false, f3: false };
+    lastLocalUpdateRef.current = Date.now();
+    dirtyFieldsRef.current = { f1: true, f2: true, f3: true };
+    dirtyGreenhouseRef.current = true;
+    dirtyMainTankRef.current = true;
+
+    setState((prev) => forceAllMotorsOff(prev));
+  }, [isDashboardFrozen, isAutomationEnabled, state]);
+
   useEffect(() => () => {
     stopMoistureButtonHold({ skipEditRelease: true });
     stopGreenhouseButtonHold();
@@ -1354,7 +1501,7 @@ const AgricultureDashboard = () => {
               : Object.prototype.hasOwnProperty.call(patch, 'wl')
                 ? 'wl'
                 : 'ph';
-            Object.assign(nextField, normalizeLinkedFieldValues(patch, preferredSource));
+            Object.assign(nextField, normalizeLinkedFieldValues(patch, preferredSource, fieldKey));
           }
 
           if (
@@ -1421,7 +1568,7 @@ const AgricultureDashboard = () => {
     };
     const setMoistureDisplayValue = (next) => {
       const normalized = Number(clamp(next, 0, 100).toFixed(1));
-      const linkedValues = normalizeLinkedFieldValues({ moisture: normalized });
+      const linkedValues = normalizeLinkedFieldValues({ moisture: normalized }, null, fieldKey);
       moistureDisplayRef.current = normalized;
       setLivePatch(linkedValues);
       commitFieldPatch(linkedValues);
@@ -1432,7 +1579,7 @@ const AgricultureDashboard = () => {
       const step = 1; // 1% per step
       const nextMoisture = currentMoisture + (direction * step);
       const normalized = Number(clamp(nextMoisture, 0, 100).toFixed(1));
-      const linkedValues = normalizeLinkedFieldValues({ moisture: normalized });
+      const linkedValues = normalizeLinkedFieldValues({ moisture: normalized }, null, fieldKey);
       
       // Update display ref immediately
       moistureDisplayRef.current = normalized;
@@ -1601,9 +1748,9 @@ const AgricultureDashboard = () => {
       const rect = phTrackRef.current.getBoundingClientRect();
       const pct = clamp((clientX - rect.left) / rect.width, 0, 1);
       const next = Number((pct * 14).toFixed(2));
-      const linkedValues = normalizeLinkedFieldValues({ ph: next }, 'ph');
-      moistureTargetRef.current = linkedValues.moisture;
-      moistureDisplayRef.current = linkedValues.moisture;
+      const linkedValues = normalizeLinkedFieldValues({ ph: next }, 'ph', fieldKey);
+      moistureTargetRef.current = linkedValues.moisture ?? moistureTargetRef.current;
+      moistureDisplayRef.current = linkedValues.moisture ?? moistureDisplayRef.current;
       setLivePatch(linkedValues);
       scheduleFieldPatch({ ph: next });
     };
@@ -1612,7 +1759,7 @@ const AgricultureDashboard = () => {
       const rect = waterLevelRef.current.getBoundingClientRect();
       const pct = clamp((rect.bottom - clientY) / rect.height, 0, 1);
       const next = Number((pct * 30).toFixed(1));
-      const linkedValues = normalizeLinkedFieldValues({ wl: next }, 'wl');
+      const linkedValues = normalizeLinkedFieldValues({ wl: next }, 'wl', fieldKey);
       moistureTargetRef.current = linkedValues.moisture;
       moistureDisplayRef.current = linkedValues.moisture;
       setLivePatch(linkedValues);
@@ -1977,38 +2124,61 @@ const AgricultureDashboard = () => {
           overflow: hidden;
         }
 
-        .dashboard-freeze-overlay {
-          position: absolute;
-          inset: 0;
-          z-index: 9000;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          background: rgba(15, 23, 42, 0.72);
-          backdrop-filter: blur(2px);
-        }
-
-        .dashboard-freeze-card {
-          width: min(640px, 92vw);
-          padding: 22px 24px;
-          border-radius: 16px;
-          border: 1px solid rgba(248, 113, 113, 0.55);
+        .reservoir-alert-popup {
+          position: fixed;
+          top: 18px;
+          left: 50%;
+          transform: translateX(-50%);
+          z-index: 9500;
+          width: min(560px, calc(100vw - 24px));
+          padding: 18px 20px;
+          border-radius: 14px;
+          border: 1px solid rgba(248, 113, 113, 0.45);
           background: linear-gradient(180deg, #fff7ed 0%, #fee2e2 100%);
-          box-shadow: 0 14px 30px rgba(15, 23, 42, 0.3);
+          box-shadow: 0 16px 30px rgba(15, 23, 42, 0.24);
           color: #7f1d1d;
-          text-align: center;
+          animation: reservoirAlertSlideIn 0.25s ease-out;
         }
 
-        .dashboard-freeze-title {
-          font-size: 28px;
+        .reservoir-alert-title {
+          font-size: 24px;
           font-weight: 900;
-          margin-bottom: 8px;
+          margin-bottom: 6px;
         }
 
-        .dashboard-freeze-body {
-          font-size: 21px;
+        .reservoir-alert-body {
+          font-size: 18px;
           font-weight: 700;
-          line-height: 1.4;
+          line-height: 1.35;
+        }
+
+        .reservoir-alert-actions {
+          display: flex;
+          justify-content: flex-end;
+          margin-top: 14px;
+        }
+
+        .reservoir-alert-ok {
+          border: none;
+          border-radius: 10px;
+          padding: 10px 22px;
+          background: #b91c1c;
+          color: #ffffff;
+          font-size: 16px;
+          font-weight: 800;
+          cursor: pointer;
+          box-shadow: 0 8px 18px rgba(185, 28, 28, 0.28);
+        }
+
+        @keyframes reservoirAlertSlideIn {
+          from {
+            opacity: 0;
+            transform: translate(-50%, -24px);
+          }
+          to {
+            opacity: 1;
+            transform: translate(-50%, 0);
+          }
         }
 
         .dash {
@@ -2162,11 +2332,11 @@ const AgricultureDashboard = () => {
         }
 
         .navbar-action-btn.reset {
-          background: linear-gradient(135deg, #dc2626 0%, #f97316 100%);
+          background: linear-gradient(135deg, #dc2626 0%, #f92116 100%);
         }
 
         .navbar-action-btn.automate {
-          background: linear-gradient(135deg, #1d4ed8 0%, #0ea5e9 100%);
+          background: linear-gradient(135deg, #1d4ed8 0%, #0e3ae9 100%);
         }
 
         .navbar-action-btn.automate.active {
@@ -2912,14 +3082,31 @@ const AgricultureDashboard = () => {
         </div>
       ) : null}
 
-      {isDashboardFrozen ? (
-        <div className="dashboard-freeze-overlay" role="alert" aria-live="assertive">
-          <div className="dashboard-freeze-card">
-            <div className="dashboard-freeze-title">Distance Alert Triggered</div>
-            <div className="dashboard-freeze-body">
-              Distance {distanceCm === null ? 'N/A' : `${distanceCm.toFixed(2)} cm`} is greater than {DISTANCE_FREEZE_THRESHOLD_CM} cm.
-              Dashboard controls are frozen.
-            </div>
+      {isReservoirAlertVisible ? (
+        <div className="reservoir-alert-popup" role="alertdialog" aria-live="assertive" aria-modal="true">
+          <div className="reservoir-alert-title">Reservoir Is Empty</div>
+          <div className="reservoir-alert-body">
+            Reservoir is empty.
+            Click OK to freeze the website until the reservoir is refilled.
+          </div>
+          <div className="reservoir-alert-actions">
+            <button
+              type="button"
+              className="reservoir-alert-ok"
+              onClick={() => {
+                setIsReservoirAlertVisible(false);
+                if (distanceCm !== null && distanceCm > RESERVOIR_EMPTY_THRESHOLD_CM) {
+                  frozenMotorSnapshotRef.current = createMotorSnapshot(
+                    state,
+                    isAutomationEnabled,
+                    manualIrrigationOverrideRef.current,
+                  );
+                  setIsDashboardFrozen(true);
+                }
+              }}
+            >
+              OK
+            </button>
           </div>
         </div>
       ) : null}
