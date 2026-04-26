@@ -25,6 +25,7 @@ from esp32connect import (
     moisture_to_water_level,
     normalize_linked_field_values,
     normalize_field_body,
+    is_irrigation_blocked_by_ph,
     number_from_value,
     print_field_update,
     reset_state_for_shutdown,
@@ -141,6 +142,27 @@ FIRE_ALERT_FALSE_PHRASES = (
     "fire: off",
     "fire: 0",
 )
+
+HTTP_SESSION_POOL_SIZE = 8
+
+
+class ReusableThreadingHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+def build_http_session():
+    session = requests.Session()
+    adapter = requests.adapters.HTTPAdapter(
+        pool_connections=HTTP_SESSION_POOL_SIZE,
+        pool_maxsize=HTTP_SESSION_POOL_SIZE,
+    )
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
+
+
+distance_http_session = build_http_session()
 
 
 class ConnectionStatusTracker:
@@ -365,9 +387,7 @@ class ESPCommandWorker:
         self._queue = queue.Queue()
         self._stop_event = threading.Event()
         self._thread = threading.Thread(target=self._run, name="esp-worker", daemon=True)
-        self._session = requests.Session()
-        adapter = requests.adapters.HTTPAdapter(pool_connections=8, pool_maxsize=8)
-        self._session.mount("http://", adapter)
+        self._session = build_http_session()
         self._last_request_at = 0.0
         self._status = ConnectionStatusTracker("ESP WORKER")
         self._pending_syncs = set()
@@ -563,6 +583,9 @@ class ControlLoopWorker:
         changes = []
         with STATE_LOCK:
             for field_key in ("f1", "f2", "f3"):
+                field = CURRENT["state"][field_key]
+                if is_irrigation_blocked_by_ph(field_key, field):
+                    field["irrigation"] = False
                 current_value = bool(CURRENT["state"][field_key]["irrigation"])
                 if current_value != self._last_irrigation[field_key]:
                     changes.append((field_key, current_value))
@@ -751,7 +774,7 @@ class MainTankSensorWorker:
     def __init__(self):
         self._stop_event = threading.Event()
         self._thread = threading.Thread(target=self._run, name="main-tank-worker", daemon=True)
-        self._session = requests.Session()
+        self._session = build_http_session()
         self._status = ConnectionStatusTracker("MAIN TANK SENSOR")
         self._error_backoff_until = 0.0
         self._last_printed_value = None
@@ -851,7 +874,7 @@ class FarmhouseFireSensorWorker:
     def __init__(self):
         self._stop_event = threading.Event()
         self._thread = threading.Thread(target=self._run, name="farmhouse-fire-worker", daemon=True)
-        self._session = requests.Session()
+        self._session = build_http_session()
         self._status = ConnectionStatusTracker("FARMHOUSE FIRE SENSOR")
         self._last_printed_value = None
         self._read_lock = threading.Lock()
@@ -1092,8 +1115,8 @@ def get_esp_payload_from_state(esp_num):
 
     if esp_num == 4:
         return {
-            "temp": int(round(state["gh"]["temp"])),
-            "humid": int(round(state["gh"]["humidity"])),
+            "temp": round(number_from_value(state["gh"]["temp"], 0.0), 1),
+            "humid": round(number_from_value(state["gh"]["humidity"], 0.0), 1),
             "fan": "on" if state["gh"].get("fanOn") else "off",
         }
 
@@ -1106,8 +1129,8 @@ def build_manual_esp_payload(esp_num, level, pump, ph, moisture):
         if fan not in {"on", "off"}:
             raise ValueError("Fan must be 'on' or 'off'")
         return {
-            "temp": int(level),
-            "humid": int(ph),
+            "temp": round(number_from_value(level, 0.0), 1),
+            "humid": round(number_from_value(ph, 0.0), 1),
             "fan": fan,
         }
 
@@ -1413,7 +1436,10 @@ class UIBackendHandler(Handler):
 
         if parsed.path == "/api/distance":
             try:
-                response = requests.get(ESP32_DISTANCE_URL, timeout=ESP32_DISTANCE_TIMEOUT_SECONDS)
+                response = distance_http_session.get(
+                    ESP32_DISTANCE_URL,
+                    timeout=ESP32_DISTANCE_TIMEOUT_SECONDS,
+                )
                 response.raise_for_status()
                 distance_cm = parse_distance_value(response.text)
                 body = f"{distance_cm:.2f}".encode("utf-8")
@@ -1531,9 +1557,14 @@ class UIBackendHandler(Handler):
                 if key in incoming:
                     gh_patch[key] = number_from_value(incoming[key], current_gh[key])
 
-            for key in ("fireAlert", "fanOn"):
+            for key in ("fireAlert",):
                 if key in incoming:
                     gh_patch[key] = bool_from_value(incoming[key])
+
+            # Always recompute fanOn from temperature only (temp > 25 → ON, temp <= 25 → OFF)
+            # Do not accept fanOn from the UI payload to avoid stale coupling
+            resolved_temp = gh_patch.get("temp", number_from_value(current_gh.get("temp"), 0.0))
+            gh_patch["fanOn"] = resolved_temp > 25.0
 
             if not gh_patch:
                 self.send_json({"error": "No greenhouse values provided"}, status=400)
@@ -1877,7 +1908,7 @@ if __name__ == "__main__":
     print("Access all values in Python with get_ui_state(), get_field_values('f1'), or get_all_variables().")
     print("Use 'send ...' for manual ESP values or 'push <esp>' to send current backend values.")
     try:
-        server = ThreadingHTTPServer((HOST, PORT), UIBackendHandler)
+        server = ReusableThreadingHTTPServer((HOST, PORT), UIBackendHandler)
     except OSError as error:
         print(f"Could not start backend on port {PORT}: {error}")
         print("Another process is already using this port. Stop the old backend process, then run again.")

@@ -15,31 +15,30 @@ const SHUTDOWN_ENDPOINT = `${API_BASE}/shutdown`;
 const AUTOMATION_ENDPOINT = `${API_BASE}/automation`;
 const ESP32_DISTANCE_ENDPOINT = `${API_BASE}/distance`;
 const DRAG_COMMIT_INTERVAL_MS = 30;
-const GREENHOUSE_FAN_TEMP_THRESHOLD = 40;
-const GREENHOUSE_FAN_HUMIDITY_THRESHOLD = 70;
-const GREENHOUSE_LOOP_TEMP_MIN = 35;
-const GREENHOUSE_LOOP_TEMP_MAX = 45;
-const GREENHOUSE_LOOP_HUMIDITY_MIN = 65;
-const GREENHOUSE_LOOP_HUMIDITY_MAX = 75;
-const GREENHOUSE_LOOP_HALF_CYCLE_MS = 60000;
-const GREENHOUSE_LOOP_TICK_MS = 2000;
-const GREENHOUSE_LOOP_STEPS = Math.max(1, Math.round(GREENHOUSE_LOOP_HALF_CYCLE_MS / GREENHOUSE_LOOP_TICK_MS));
-const GREENHOUSE_TEMP_STEP_PER_TICK = (GREENHOUSE_LOOP_TEMP_MAX - GREENHOUSE_LOOP_TEMP_MIN) / GREENHOUSE_LOOP_STEPS;
+const GREENHOUSE_FAN_TEMP_THRESHOLD = 25;
 const MAIN_TANK_CAPACITY_ML = 500;
 const MAIN_TANK_REFILL_START_PERCENT = 20;
 const MAIN_TANK_FLOW_REDUCE_PERCENT = 80;
 const MAIN_TANK_FILL_TIME_MINUTES = 2;
 const AUTOMATION_TICK_MS = 1200;
-const STATUS_REFRESH_INTERVAL_MS = 500;
+const STATUS_REFRESH_INTERVAL_MS = 900;
 const DISTANCE_REFRESH_INTERVAL_MS = 1000;
 const RESERVOIR_EMPTY_THRESHOLD_CM = 10;
 const RESET_HOLD_MS = 5000;
+const PH_RECOVERY_IRRIGATION_DELAY_MS = 2000;
+const LOCAL_UI_SYNC_GRACE_MS = 900;
 const IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD = 30;
 const IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD = 60;
 const MAIN_TANK_HIGH_FILL_PERCENT_PER_TICK = 2.0;
 const MAIN_TANK_LOW_FILL_PERCENT_PER_TICK = 2.0;
 const PH_TARGET = 7;
 const FIELD_KEYS_WITH_PH_CONDITION = new Set(['f1', 'f2']);
+const EXTREME_PH_LOW = 4;
+const EXTREME_PH_HIGH = 10;
+const IRRIGATION_DRAIN_TO_MOISTURE = 40;
+const WL_PH_FIX_DRAIN_TARGET = 12;
+const WL_PH_FIX_IRRIGATE_UNTIL = 18;
+const FIELD_KEYS_WITH_MIX_CONDITION = new Set(['f1', 'f2']);
 const getPhChemicalState = (ph) => ({
   acid: ph < PH_TARGET,
   base: ph > PH_TARGET,
@@ -47,47 +46,7 @@ const getPhChemicalState = (ph) => ({
 const fieldSupportsPhCondition = (fieldKey) => FIELD_KEYS_WITH_PH_CONDITION.has(fieldKey);
 const getGreenhouseFanState = (greenhouse = {}) => (
   Number(greenhouse.temp ?? 0) > GREENHOUSE_FAN_TEMP_THRESHOLD
-  && Number(greenhouse.humidity ?? 0) > GREENHOUSE_FAN_HUMIDITY_THRESHOLD
 );
-const getCoupledHumidityFromTemp = (temp) => {
-  const tempProgress = clampValue(
-    (Number(temp ?? GREENHOUSE_LOOP_TEMP_MIN) - GREENHOUSE_LOOP_TEMP_MIN)
-      / (GREENHOUSE_LOOP_TEMP_MAX - GREENHOUSE_LOOP_TEMP_MIN),
-    0,
-    1,
-  );
-  return Number((
-    GREENHOUSE_LOOP_HUMIDITY_MIN
-    + (tempProgress * (GREENHOUSE_LOOP_HUMIDITY_MAX - GREENHOUSE_LOOP_HUMIDITY_MIN))
-  ).toFixed(1));
-};
-const advanceGreenhouseLoop = (greenhouse = {}, direction = 1) => {
-  const currentTemp = Number(greenhouse.temp ?? GREENHOUSE_LOOP_TEMP_MIN);
-  let nextDirection = direction >= 0 ? 1 : -1;
-  let nextTemp = currentTemp + (nextDirection * GREENHOUSE_TEMP_STEP_PER_TICK);
-
-  if (nextTemp >= GREENHOUSE_LOOP_TEMP_MAX) {
-    nextTemp = GREENHOUSE_LOOP_TEMP_MAX;
-    nextDirection = -1;
-  } else if (nextTemp <= GREENHOUSE_LOOP_TEMP_MIN) {
-    nextTemp = GREENHOUSE_LOOP_TEMP_MIN;
-    nextDirection = 1;
-  }
-
-  const normalizedTemp = Number(nextTemp.toFixed(1));
-  const nextHumidity = getCoupledHumidityFromTemp(normalizedTemp);
-  const nextGreenhouse = {
-    ...greenhouse,
-    temp: normalizedTemp,
-    humidity: nextHumidity,
-  };
-  nextGreenhouse.fanOn = getGreenhouseFanState(nextGreenhouse);
-
-  return {
-    nextGreenhouse,
-    nextDirection,
-  };
-};
 const getDashboardStateFromPayload = (payload) => (
   payload?.dashboard?.state
   ?? payload?.state
@@ -105,18 +64,18 @@ const ZERO_DASHBOARD_STATE = {
   mainTankManualOverride: null,
   flowRate: 0,
   gh: {
-    temp: 35,
-    humidity: 65,
+    temp: 25,
+    humidity: 35,
     fireAlert: false,
     fanOn: false,
     fireSensor: { online: false, lastUpdatedAt: null, raw: '', error: '' },
   },
-  f1: { moisture: 0, ph: 0, wl: 0, n: 0, p: 0, k: 0, irrigation: false, drain: false, acid: false, base: false },
-  f2: { moisture: 0, ph: 0, wl: 0, n: 0, p: 0, k: 0, irrigation: false, drain: false, acid: false, base: false },
-  f3: { moisture: 0, ph: 0, wl: 0, n: 0, p: 0, k: 0, irrigation: false, drain: false, acid: false, base: false },
+  f1: { moisture: 0, ph: 7, wl: 0, n: 0, p: 0, k: 0, irrigation: false, drain: false, acid: false, base: false, mix: false },
+  f2: { moisture: 0, ph: 7, wl: 0, n: 0, p: 0, k: 0, irrigation: false, drain: false, acid: false, base: false, mix: false },
+  f3: { moisture: 0, ph: 7, wl: 0, n: 0, p: 0, k: 0, irrigation: false, drain: false, acid: false, base: false, mix: false },
 };
 
-const createResetDashboardState = (snapshot = {}) => ({
+const createResetDashboardState = (snapshot = {}) => applyMainTankRules({
   ...ZERO_DASHBOARD_STATE,
   tank: 0,
   tankSensor: {
@@ -124,13 +83,13 @@ const createResetDashboardState = (snapshot = {}) => ({
     ...(snapshot.tankSensor || {}),
   },
   pumping: false,
-  mainTankManualOverride: false,
+  mainTankManualOverride: null,
   flowRate: 0,
   gh: {
     ...ZERO_DASHBOARD_STATE.gh,
     ...(snapshot.gh || {}),
-    temp: 0,
-    humidity: 0,
+    temp: ZERO_DASHBOARD_STATE.gh.temp,
+    humidity: ZERO_DASHBOARD_STATE.gh.humidity,
     fireAlert: false,
     fanOn: false,
     fireSensor: {
@@ -161,46 +120,65 @@ const createInitialDashboardState = () => applyMainTankRules({
 });
 
 const clampValue = (value, min, max) => Math.max(min, Math.min(max, value));
-const moistureToWaterLevel = (moisture) => Number(clampValue((moisture / 100) * 30, 0, 30).toFixed(1));
-const waterLevelToMoisture = (waterLevel) => Number(clampValue((waterLevel / 30) * 100, 0, 100).toFixed(1));
 const moistureToPh = (moisture) => Number(clampValue((Number(moisture ?? 0) / 60) * 7, 0, 7).toFixed(2));
-const phToMoisture = (ph) => Number(clampValue((Number(ph ?? PH_TARGET) / 7) * 60, 0, 60).toFixed(1));
+const phToMoisture = (ph) => Number(clampValue((Number(ph ?? PH_TARGET) / 14) * 100, 0, 100).toFixed(1));
 const normalizeLinkedFieldValues = (patch = {}, preferredSource = null, fieldKey = null) => {
-  const nextPatch = { ...patch };
-  const hasMoisture = Object.prototype.hasOwnProperty.call(nextPatch, 'moisture');
-  const hasWaterLevel = Object.prototype.hasOwnProperty.call(nextPatch, 'wl');
-  const hasPh = Object.prototype.hasOwnProperty.call(nextPatch, 'ph');
-  const supportsPhCondition = fieldSupportsPhCondition(fieldKey);
-
-  const source = preferredSource ?? (hasMoisture ? 'moisture' : hasWaterLevel ? 'wl' : hasPh ? 'ph' : null);
-
-  if (source === 'wl' && hasWaterLevel) {
-    nextPatch.wl = Number(clampValue(nextPatch.wl, 0, 30).toFixed(1));
-    nextPatch.moisture = waterLevelToMoisture(nextPatch.wl);
-    nextPatch.ph = moistureToPh(nextPatch.moisture);
-  } else if (source === 'ph' && hasPh) {
-    nextPatch.ph = Number(clampValue(nextPatch.ph, 0, 14).toFixed(2));
-  } else if (hasMoisture) {
-    const normalizedMoisture = Number(clampValue(nextPatch.moisture, 0, 100).toFixed(1));
-    nextPatch.moisture = normalizedMoisture;
-    nextPatch.wl = moistureToWaterLevel(normalizedMoisture);
-    nextPatch.ph = moistureToPh(normalizedMoisture);
+  const nextPatch = {};
+  if (Object.prototype.hasOwnProperty.call(patch, 'moisture')) {
+    nextPatch.moisture = Number(clampValue(patch.moisture, 0, 100).toFixed(1));
   }
-
-  if (Object.prototype.hasOwnProperty.call(nextPatch, 'ph')) {
-    if (supportsPhCondition) {
+  if (Object.prototype.hasOwnProperty.call(patch, 'wl')) {
+    nextPatch.wl = Number(clampValue(patch.wl, 0, 30).toFixed(1));
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'ph')) {
+    nextPatch.ph = Number(clampValue(patch.ph, 0, 14).toFixed(2));
+    if (fieldSupportsPhCondition(fieldKey)) {
       Object.assign(nextPatch, getPhChemicalState(nextPatch.ph));
     }
   }
-
   return nextPatch;
 };
-const canFieldStartIrrigation = (fieldKey, field) => Number(field?.moisture ?? 0) < IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD;
+const canFieldStartIrrigation = (fieldKey, field) => {
+  const moisture = Number(field?.moisture ?? 0);
+  const ph = Number(field?.ph ?? PH_TARGET);
+  const phInRange = ph >= EXTREME_PH_LOW && ph <= EXTREME_PH_HIGH;
+  return fieldKey === 'f3'
+    ? moisture < IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD
+    : moisture < IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD && phInRange;
+};
 const shouldFieldIrrigate = (fieldKey, field, wasIrrigating = false) => {
   const moisture = Number(field?.moisture ?? 0);
+  const ph = Number(field?.ph ?? PH_TARGET);
+  const phInRange = ph >= EXTREME_PH_LOW && ph <= EXTREME_PH_HIGH;
+  if (fieldKey !== 'f3' && !phInRange) return false;
   if (moisture >= IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD) return false;
   if (moisture < IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD) return true;
   return Boolean(wasIrrigating);
+};
+const getFieldAutomationPatch = (fieldKey, field, wasIrrigating = false, wasDraining = false, phJustReset = false) => {
+  const moisture = Number(field?.moisture ?? 0);
+  const ph = Number(field?.ph ?? PH_TARGET);
+  const wl = Number(field?.wl ?? 0);
+  const hasMix = FIELD_KEYS_WITH_MIX_CONDITION.has(fieldKey);
+  const phInRange = ph >= EXTREME_PH_LOW && ph <= EXTREME_PH_HIGH;
+  const extremePh = hasMix && (ph < EXTREME_PH_LOW || ph > EXTREME_PH_HIGH);
+
+  if (extremePh && moisture > IRRIGATION_DRAIN_TO_MOISTURE) {
+    if (wl > WL_PH_FIX_DRAIN_TARGET) {
+      return { irrigation: false, drain: true, mix: true };
+    }
+    return { irrigation: false, drain: false, mix: false };
+  }
+
+  if (phJustReset || (hasMix && phInRange && wl <= WL_PH_FIX_DRAIN_TARGET && moisture >= 40 && moisture < IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD)) {
+    return { irrigation: false, drain: false, mix: false };
+  }
+
+  return {
+    irrigation: shouldFieldIrrigate(fieldKey, field, wasIrrigating),
+    drain: false,
+    mix: false,
+  };
 };
 const percentPerTickToLitersPerMinute = (percentPerTick) => (
   (percentPerTick / 100) * MAIN_TANK_CAPACITY_ML * (60000 / AUTOMATION_TICK_MS) / 1000
@@ -292,20 +270,20 @@ const restoreMotorSnapshot = (currentState, snapshot) => {
     return currentState;
   }
 
-  const getRecoveredFieldState = (field) => {
-    const shouldResumeIrrigation = Number(field?.moisture ?? 0) < IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD;
+  const getRecoveredFieldState = (fieldKey, field) => {
+    const shouldResumeIrrigation = canFieldStartIrrigation(fieldKey, field);
     return {
       ...field,
       // After unfreeze, moisture should continue rising from the current value
-      // until it reaches the 60% cutoff. Drain must stay off for that recovery run.
+      // until it reaches the allowed cutoff. Drain must stay off for that recovery run.
       irrigation: shouldResumeIrrigation,
       drain: false,
     };
   };
 
-  const nextF1 = getRecoveredFieldState(currentState.f1);
-  const nextF2 = getRecoveredFieldState(currentState.f2);
-  const nextF3 = getRecoveredFieldState(currentState.f3);
+  const nextF1 = getRecoveredFieldState('f1', currentState.f1);
+  const nextF2 = getRecoveredFieldState('f2', currentState.f2);
+  const nextF3 = getRecoveredFieldState('f3', currentState.f3);
 
   const nextState = {
     ...currentState,
@@ -330,9 +308,6 @@ const moveToward = (value, target, step, digits = 1) => {
   const direction = target > value ? 1 : -1;
   return Number((value + direction * step).toFixed(digits));
 };
-const moveBooleanTowardTarget = (currentValue, targetValue, ready) => (
-  ready ? Boolean(targetValue) : Boolean(currentValue)
-);
 const moveFieldTowardTarget = (fieldKey, currentField, targetField) => {
   const nextMoisture = moveToward(
     Number(currentField?.moisture ?? 0),
@@ -344,18 +319,19 @@ const moveFieldTowardTarget = (fieldKey, currentField, targetField) => {
   const nextN = moveToward(Number(currentField?.n ?? 0), Number(targetField?.n ?? 0), 1, 1);
   const nextP = moveToward(Number(currentField?.p ?? 0), Number(targetField?.p ?? 0), 1, 1);
   const nextK = moveToward(Number(currentField?.k ?? 0), Number(targetField?.k ?? 0), 1, 1);
-  const closeToTarget = Math.abs(nextMoisture - Number(targetField?.moisture ?? 0)) <= 0.1;
 
   return {
     ...currentField,
     ...linkedValues,
+    ph: Number(targetField?.ph ?? currentField?.ph ?? PH_TARGET),
     n: nextN,
     p: nextP,
     k: nextK,
-    irrigation: moveBooleanTowardTarget(currentField?.irrigation, targetField?.irrigation, closeToTarget),
-    drain: moveBooleanTowardTarget(currentField?.drain, targetField?.drain, closeToTarget),
-    acid: moveBooleanTowardTarget(currentField?.acid, targetField?.acid, closeToTarget),
-    base: moveBooleanTowardTarget(currentField?.base, targetField?.base, closeToTarget),
+    irrigation: Boolean(targetField?.irrigation),
+    drain: Boolean(targetField?.drain),
+    acid: Boolean(targetField?.acid),
+    base: Boolean(targetField?.base),
+    mix: Boolean(targetField?.mix),
   };
 };
 const moveDashboardStateTowardTarget = (currentState, targetState) => {
@@ -411,6 +387,66 @@ const hasResetAnimationReachedTarget = (currentState, targetState) => {
     ))
   );
 };
+const areFieldStatesEqual = (left = {}, right = {}) => (
+  Number(left.moisture ?? 0) === Number(right.moisture ?? 0)
+  && Number(left.ph ?? PH_TARGET) === Number(right.ph ?? PH_TARGET)
+  && Number(left.wl ?? 0) === Number(right.wl ?? 0)
+  && Number(left.n ?? 0) === Number(right.n ?? 0)
+  && Number(left.p ?? 0) === Number(right.p ?? 0)
+  && Number(left.k ?? 0) === Number(right.k ?? 0)
+  && Boolean(left.irrigation) === Boolean(right.irrigation)
+  && Boolean(left.drain) === Boolean(right.drain)
+  && Boolean(left.acid) === Boolean(right.acid)
+  && Boolean(left.base) === Boolean(right.base)
+  && Boolean(left.mix) === Boolean(right.mix)
+);
+const areDashboardStatesEqual = (left = {}, right = {}) => (
+  Number(left.tank ?? 0) === Number(right.tank ?? 0)
+  && Number(left.tankSensor?.value ?? 0) === Number(right.tankSensor?.value ?? 0)
+  && Boolean(left.tankSensor?.online) === Boolean(right.tankSensor?.online)
+  && String(left.tankSensor?.error ?? '') === String(right.tankSensor?.error ?? '')
+  && Boolean(left.pumping) === Boolean(right.pumping)
+  && (left.mainTankManualOverride ?? null) === (right.mainTankManualOverride ?? null)
+  && Number(left.flowRate ?? 0) === Number(right.flowRate ?? 0)
+  && Number(left.gh?.temp ?? 0) === Number(right.gh?.temp ?? 0)
+  && Number(left.gh?.humidity ?? 0) === Number(right.gh?.humidity ?? 0)
+  && Boolean(left.gh?.fanOn) === Boolean(right.gh?.fanOn)
+  && Boolean(left.gh?.fireAlert) === Boolean(right.gh?.fireAlert)
+  && areFieldStatesEqual(left.f1, right.f1)
+  && areFieldStatesEqual(left.f2, right.f2)
+  && areFieldStatesEqual(left.f3, right.f3)
+);
+const StatusChip = ({ on, label, onClick, activeColor = '#16a34a' }) => (
+  <span
+    onClick={onClick}
+    style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '4px', width: '100%', fontSize: '24px', fontWeight: 700, color: on ? activeColor : '#94a3b8', cursor: 'pointer', userSelect: 'none', textAlign: 'center' }}
+    title={`Toggle ${label}`}
+  >
+    <span className="dot" style={{ background: on ? activeColor : '#cbd5e1' }}></span>
+    {label}
+  </span>
+);
+const WaterScale = ({ ticks, unit, compact = false }) => (
+  <div className={`water-scale ${compact ? 'compact' : ''}`}>
+    {ticks.map((tick) => (
+      <div
+        key={tick.value}
+        className={`scale-tick ${tick.emphasis ? 'emphasis' : ''} ${tick.position === 100 ? 'top-edge' : ''} ${tick.position === 0 ? 'bottom-edge' : ''}`}
+        style={{ top: `${100 - tick.position}%` }}
+      >
+        <span className="scale-line"></span>
+        <span className="scale-label">{tick.label ?? tick.value}</span>
+      </div>
+    ))}
+    {unit ? <span className="scale-unit">{unit}</span> : null}
+  </div>
+);
+const AnimatedWaterFill = ({ height, label }) => (
+  <div className="water-fill" style={{ height }}>
+    <div className="water-wave"></div>
+    {label ? <span className="water-value">{label}</span> : null}
+  </div>
+);
 const AgricultureDashboard = () => {
   const BASE_DASHBOARD_WIDTH = 1480;
   const [state, setState] = useState(createInitialDashboardState);
@@ -450,10 +486,13 @@ const AgricultureDashboard = () => {
   const greenhouseHoldMetricRef = useRef(null);
   const greenhouseHoldDirectionRef = useRef(0);
   const greenhouseHoldLastTouchTsRef = useRef(0);
-  const greenhouseLoopDirectionRef = useRef(1);
   const greenhouseEditReleaseTimeoutRef = useRef(null);
   const greenhouseEditLockUntilRef = useRef(0);
   const greenhouseDisplayFrameRef = useRef(null);
+  const phAnimatingRef = useRef({ f1: false, f2: false, f3: false });
+  const phRecoveryReadyAtRef = useRef({ f1: null, f2: null, f3: null });
+  const statusRequestInFlightRef = useRef(false);
+  const distanceRequestInFlightRef = useRef(false);
 
   const stopResetSequence = () => {
     if (resetReleaseTimeoutRef.current !== null) {
@@ -501,6 +540,17 @@ const AgricultureDashboard = () => {
       };
 
       nextGreenhouse.fanOn = getGreenhouseFanState(nextGreenhouse);
+
+      // Keep the visible reading locked to the latest button direction immediately
+      // so reversing from increment to decrement does not continue the old animation.
+      if (greenhouseDisplayFrameRef.current !== null) {
+        window.cancelAnimationFrame(greenhouseDisplayFrameRef.current);
+        greenhouseDisplayFrameRef.current = null;
+      }
+      setGreenhouseDisplay({
+        temp: nextGreenhouse.temp,
+        humidity: nextGreenhouse.humidity,
+      });
 
       return {
         ...prev,
@@ -575,6 +625,7 @@ const AgricultureDashboard = () => {
     stopResetSequence();
     activeEditFieldsRef.current = {};
     manualIrrigationOverrideRef.current = { f1: false, f2: false, f3: false };
+    phRecoveryReadyAtRef.current = { f1: null, f2: null, f3: null };
     dirtyFieldsRef.current = { f1: true, f2: true, f3: true };
     dirtyGreenhouseRef.current = true;
     dirtyMainTankRef.current = true;
@@ -583,8 +634,7 @@ const AgricultureDashboard = () => {
     lastQueuedPayloadRef.current = {};
     isResetSequenceRef.current = true;
     resetHoldUntilRef.current = Date.now() + RESET_HOLD_MS;
-    greenhouseLoopDirectionRef.current = 1;
-    setIsAutomationEnabled(true);
+    setIsAutomationEnabled(false);
     setState((prev) => createResetDashboardState({
       tankSensor: prev.tankSensor,
       gh: prev.gh,
@@ -593,7 +643,7 @@ const AgricultureDashboard = () => {
       resetReleaseTimeoutRef.current = null;
     }, RESET_HOLD_MS);
 
-    const ok = await syncAutomationState(true);
+    const ok = await syncAutomationState(false);
     if (!ok) {
       stopResetSequence();
       setIsAutomationEnabled(false);
@@ -604,6 +654,7 @@ const AgricultureDashboard = () => {
     if (!payloadState) return;
 
     setState((prevState) => {
+      const isRecentLocalUpdate = (Date.now() - lastLocalUpdateRef.current) < LOCAL_UI_SYNC_GRACE_MS;
       const isGreenhouseEditLocked = Date.now() < greenhouseEditLockUntilRef.current;
       const isResetSequenceActive = isResetSequenceRef.current;
       const isResetHoldActive = isResetSequenceActive && Date.now() < resetHoldUntilRef.current;
@@ -641,35 +692,66 @@ const AgricultureDashboard = () => {
 
       const mergedState = {
         ...prevState,
-        tank: isResetSequenceActive
+        tank: isResetSequenceActive || (isRecentLocalUpdate && dirtyMainTankRef.current)
           ? prevState.tank
           : (hasFreshMainTankData && hasIncomingResolvedTank ? incomingResolvedTank : prevState.tank),
         tankSensor: {
           ...prevState.tankSensor,
           ...(payloadState.tankSensor || {}),
         },
-        pumping: isResetSequenceActive ? prevState.pumping : (payloadState.pumping ?? prevState.pumping),
-        mainTankManualOverride: isResetSequenceActive ? prevState.mainTankManualOverride : (payloadState.mainTankManualOverride ?? prevState.mainTankManualOverride ?? null),
-        flowRate: isResetSequenceActive ? prevState.flowRate : (payloadState.flowRate ?? prevState.flowRate),
+        pumping: (isResetSequenceActive || (isRecentLocalUpdate && dirtyMainTankRef.current))
+          ? prevState.pumping
+          : (payloadState.pumping ?? prevState.pumping),
+        mainTankManualOverride: (isResetSequenceActive || (isRecentLocalUpdate && dirtyMainTankRef.current))
+          ? prevState.mainTankManualOverride
+          : (payloadState.mainTankManualOverride ?? prevState.mainTankManualOverride ?? null),
+        flowRate: (isResetSequenceActive || (isRecentLocalUpdate && dirtyMainTankRef.current))
+          ? prevState.flowRate
+          : (payloadState.flowRate ?? prevState.flowRate),
         gh: {
           ...prevState.gh,
           ...(payloadState.gh || {}),
-          temp: isGreenhouseEditLocked
+          temp: (isGreenhouseEditLocked || (isRecentLocalUpdate && dirtyGreenhouseRef.current))
             ? prevState.gh.temp
             : (payloadState.gh?.temp ?? prevState.gh.temp),
-          humidity: isGreenhouseEditLocked
+          humidity: (isGreenhouseEditLocked || (isRecentLocalUpdate && dirtyGreenhouseRef.current))
             ? prevState.gh.humidity
             : (payloadState.gh?.humidity ?? prevState.gh.humidity),
-          fanOn: isGreenhouseEditLocked
+          fanOn: (isGreenhouseEditLocked || (isRecentLocalUpdate && dirtyGreenhouseRef.current))
             ? prevState.gh.fanOn
-            : (payloadState.gh?.fanOn ?? prevState.gh.fanOn),
+            : getGreenhouseFanState({
+                ...prevState.gh,
+                ...(payloadState.gh || {}),
+                temp: payloadState.gh?.temp ?? prevState.gh.temp,
+                humidity: payloadState.gh?.humidity ?? prevState.gh.humidity,
+              }),
           fireAlert: hasFreshFireData
             ? Boolean(payloadState.gh.fireAlert)
             : (payloadState.gh?.fireAlert ?? prevState.gh.fireAlert),
         },
-        f1: activeEditFieldsRef.current.f1 ? prevState.f1 : (payloadState.f1 ?? prevState.f1),
-        f2: activeEditFieldsRef.current.f2 ? prevState.f2 : (payloadState.f2 ?? prevState.f2),
-        f3: activeEditFieldsRef.current.f3 ? prevState.f3 : (payloadState.f3 ?? prevState.f3),
+        f1: (activeEditFieldsRef.current.f1 || (isRecentLocalUpdate && dirtyFieldsRef.current.f1))
+          ? prevState.f1
+          : (() => {
+              const srv = payloadState.f1 ?? prevState.f1;
+              return phAnimatingRef.current.f1
+                ? { ...srv, ph: prevState.f1.ph, acid: prevState.f1.acid, base: prevState.f1.base }
+                : srv;
+            })(),
+        f2: (activeEditFieldsRef.current.f2 || (isRecentLocalUpdate && dirtyFieldsRef.current.f2))
+          ? prevState.f2
+          : (() => {
+              const srv = payloadState.f2 ?? prevState.f2;
+              return phAnimatingRef.current.f2
+                ? { ...srv, ph: prevState.f2.ph, acid: prevState.f2.acid, base: prevState.f2.base }
+                : srv;
+            })(),
+        f3: (activeEditFieldsRef.current.f3 || (isRecentLocalUpdate && dirtyFieldsRef.current.f3))
+          ? prevState.f3
+          : {
+              ...(payloadState.f3 ?? prevState.f3),
+              acid: false,
+              base: false,
+            },
         time: new Date().toLocaleTimeString(),
       };
 
@@ -698,7 +780,8 @@ const AgricultureDashboard = () => {
         return animatedState;
       }
 
-      return applyMainTankRules(mergedState, prevState);
+      const nextState = applyMainTankRules(mergedState, prevState);
+      return areDashboardStatesEqual(prevState, nextState) ? prevState : nextState;
     });
   };
 
@@ -786,10 +869,22 @@ const AgricultureDashboard = () => {
     }
 
     let isCancelled = false;
+    let activeController = null;
 
     const refreshFromServer = async () => {
+      if (statusRequestInFlightRef.current) {
+        return;
+      }
+
+      const controller = new AbortController();
+      activeController = controller;
+      statusRequestInFlightRef.current = true;
+
       try {
-        const response = await fetch(`${API_BASE}/status`, { cache: 'no-store' });
+        const response = await fetch(`${API_BASE}/status`, {
+          cache: 'no-store',
+          signal: controller.signal,
+        });
         if (!response.ok) {
           throw new Error(`HTTP ${response.status}`);
         }
@@ -801,8 +896,13 @@ const AgricultureDashboard = () => {
         setIsAutomationEnabled(Boolean(payload.automationEnabled));
         mergeDashboardState(dashboardState);
       } catch (error) {
-        if (!isCancelled) {
+        if (!isCancelled && error.name !== 'AbortError') {
           console.error(`Python server sync failed: ${error.message}`);
+        }
+      } finally {
+        statusRequestInFlightRef.current = false;
+        if (activeController === controller) {
+          activeController = null;
         }
       }
     };
@@ -812,16 +912,32 @@ const AgricultureDashboard = () => {
 
     return () => {
       isCancelled = true;
+      if (activeController) {
+        activeController.abort();
+      }
+      statusRequestInFlightRef.current = false;
       window.clearInterval(intervalId);
     };
   }, [isDashboardFrozen]);
 
   useEffect(() => {
     let isCancelled = false;
+    let activeController = null;
 
     const refreshDistance = async () => {
+      if (distanceRequestInFlightRef.current) {
+        return;
+      }
+
+      const controller = new AbortController();
+      activeController = controller;
+      distanceRequestInFlightRef.current = true;
+
       try {
-        const response = await fetch(ESP32_DISTANCE_ENDPOINT, { cache: 'no-store' });
+        const response = await fetch(ESP32_DISTANCE_ENDPOINT, {
+          cache: 'no-store',
+          signal: controller.signal,
+        });
         if (!response.ok) {
           throw new Error(`HTTP ${response.status}`);
         }
@@ -845,8 +961,13 @@ const AgricultureDashboard = () => {
           setIsDashboardFrozen(false);
         }
       } catch (error) {
-        if (!isCancelled) {
+        if (!isCancelled && error.name !== 'AbortError') {
           setDistanceError(error.message);
+        }
+      } finally {
+        distanceRequestInFlightRef.current = false;
+        if (activeController === controller) {
+          activeController = null;
         }
       }
     };
@@ -856,6 +977,10 @@ const AgricultureDashboard = () => {
 
     return () => {
       isCancelled = true;
+      if (activeController) {
+        activeController.abort();
+      }
+      distanceRequestInFlightRef.current = false;
       window.clearInterval(intervalId);
     };
   }, [isDashboardFrozen]);
@@ -1003,6 +1128,7 @@ const AgricultureDashboard = () => {
       status: field.drain ? 'drain' : 'irrigation',
       acid: field.acid,
       base: field.base,
+      mix: field.mix ?? false,
     };
   };
 
@@ -1244,9 +1370,9 @@ const AgricultureDashboard = () => {
         setIsAutomationEnabled(frozenSnapshot.automationEnabled);
         syncAutomationState(frozenSnapshot.automationEnabled);
         manualIrrigationOverrideRef.current = {
-          f1: Number(state.f1?.moisture ?? 0) < IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD ? true : undefined,
-          f2: Number(state.f2?.moisture ?? 0) < IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD ? true : undefined,
-          f3: Number(state.f3?.moisture ?? 0) < IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD ? true : undefined,
+          f1: canFieldStartIrrigation('f1', state.f1) ? true : undefined,
+          f2: canFieldStartIrrigation('f2', state.f2) ? true : undefined,
+          f3: canFieldStartIrrigation('f3', state.f3) ? true : undefined,
         };
         lastLocalUpdateRef.current = Date.now();
         dirtyFieldsRef.current = { f1: true, f2: true, f3: true };
@@ -1279,40 +1405,6 @@ const AgricultureDashboard = () => {
     clearGreenhouseEditReleaseTimer();
   }, [stopGreenhouseButtonHold]);
 
-  const StatusChip = ({ on, label, onClick, activeColor = '#16a34a' }) => (
-    <span
-      onClick={onClick}
-      style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '4px', width: '100%', fontSize: '24px', fontWeight: 700, color: on ? activeColor : '#94a3b8', cursor: 'pointer', userSelect: 'none', textAlign: 'center' }}
-      title={`Toggle ${label}`}
-    >
-      <span className="dot" style={{ background: on ? activeColor : '#cbd5e1' }}></span>
-      {label}
-    </span>
-  );
-
-  const WaterScale = ({ ticks, unit, compact = false }) => (
-    <div className={`water-scale ${compact ? 'compact' : ''}`}>
-      {ticks.map((tick) => (
-        <div
-          key={tick.value}
-          className={`scale-tick ${tick.emphasis ? 'emphasis' : ''} ${tick.position === 100 ? 'top-edge' : ''} ${tick.position === 0 ? 'bottom-edge' : ''}`}
-          style={{ top: `${100 - tick.position}%` }}
-        >
-          <span className="scale-line"></span>
-          <span className="scale-label">{tick.label ?? tick.value}</span>
-        </div>
-      ))}
-      {unit ? <span className="scale-unit">{unit}</span> : null}
-    </div>
-  );
-
-  const AnimatedWaterFill = ({ height, label }) => (
-    <div className="water-fill" style={{ height }}>
-      <div className="water-wave"></div>
-      {label ? <span className="water-value">{label}</span> : null}
-    </div>
-  );
-
   const FieldCard = ({ data, title, fieldKey }) => {
     const showPhControls = true;
     const showChemicalControls = true;
@@ -1332,6 +1424,8 @@ const AgricultureDashboard = () => {
     const moistureAnimationFrameRef = useRef(null);
     const moistureTargetRef = useRef(data.moisture);
     const moistureDisplayRef = useRef(data.moisture);
+    const moistureEditReleaseTimeoutRef = useRef(null);
+    const moistureEditLockUntilRef = useRef(0);
     const patchTimeoutRef = useRef(null);
     const lastPatchFlushRef = useRef(0);
     const dragListenersBoundRef = useRef(false);
@@ -1380,22 +1474,34 @@ const AgricultureDashboard = () => {
             || Object.prototype.hasOwnProperty.call(patch, 'ph')
           ) {
             nextManualOverride = undefined;
-            const preferredSource = Object.prototype.hasOwnProperty.call(patch, 'moisture')
-              ? 'moisture'
+            const preferredSource = Object.prototype.hasOwnProperty.call(patch, 'ph')
+              ? 'ph'
               : Object.prototype.hasOwnProperty.call(patch, 'wl')
                 ? 'wl'
-                : 'ph';
+                : 'moisture';
             Object.assign(nextField, normalizeLinkedFieldValues(patch, preferredSource, fieldKey));
           }
 
           if (
             Object.prototype.hasOwnProperty.call(patch, 'moisture')
             || Object.prototype.hasOwnProperty.call(patch, 'wl')
+            || Object.prototype.hasOwnProperty.call(patch, 'ph')
           ) {
-            nextField.irrigation = shouldFieldIrrigate(fieldKey, nextField, Boolean(prev[fieldKey]?.irrigation));
-          }
-          if (Object.prototype.hasOwnProperty.call(patch, 'ph')) {
-            nextField.irrigation = shouldFieldIrrigate(fieldKey, nextField, Boolean(prev[fieldKey]?.irrigation));
+            const prevPh = Number(prev[fieldKey]?.ph ?? PH_TARGET);
+            const prevHadExtremePh = prevPh < EXTREME_PH_LOW || prevPh > EXTREME_PH_HIGH;
+            const nextPh = Number(nextField.ph ?? PH_TARGET);
+            const phNowNormal = nextPh >= EXTREME_PH_LOW && nextPh <= EXTREME_PH_HIGH;
+            const phJustReset = (prevHadExtremePh && phNowNormal) || (phNowNormal && Boolean(prev[fieldKey]?.drain));
+            const autoPatch = getFieldAutomationPatch(
+              fieldKey,
+              nextField,
+              Boolean(prev[fieldKey]?.irrigation),
+              Boolean(prev[fieldKey]?.drain),
+              phJustReset,
+            );
+            nextField.irrigation = autoPatch.irrigation;
+            nextField.drain = autoPatch.drain;
+            nextField.mix = autoPatch.mix;
           }
 
           if (nextManualOverride === undefined) {
@@ -1450,12 +1556,28 @@ const AgricultureDashboard = () => {
         moistureAnimationFrameRef.current = null;
       }
     };
+    const clearMoistureEditReleaseTimer = () => {
+      if (moistureEditReleaseTimeoutRef.current !== null) {
+        window.clearTimeout(moistureEditReleaseTimeoutRef.current);
+        moistureEditReleaseTimeoutRef.current = null;
+      }
+    };
+    const holdMoistureLocalValue = (delayMs = 1500) => {
+      activeEditFieldsRef.current[fieldKey] = true;
+      moistureEditLockUntilRef.current = Date.now() + delayMs;
+      clearMoistureEditReleaseTimer();
+      moistureEditReleaseTimeoutRef.current = window.setTimeout(() => {
+        moistureEditLockUntilRef.current = 0;
+        moistureEditReleaseTimeoutRef.current = null;
+        activeEditFieldsRef.current[fieldKey] = false;
+      }, delayMs);
+    };
     const setMoistureDisplayValue = (next) => {
       const normalized = Number(clamp(next, 0, 100).toFixed(1));
-      const linkedValues = normalizeLinkedFieldValues({ moisture: normalized }, null, fieldKey);
+      holdMoistureLocalValue();
       moistureDisplayRef.current = normalized;
-      setLivePatch(linkedValues);
-      commitFieldPatch(linkedValues);
+      setLivePatch({ moisture: normalized });
+      commitFieldPatch({ moisture: normalized });
     };
     const animateMoistureTowardTarget = () => {
       moistureAnimationFrameRef.current = null;
@@ -1516,20 +1638,15 @@ const AgricultureDashboard = () => {
       const pct = clamp((clientX - rect.left) / rect.width, 0, 1);
       const next = Number((pct * 14).toFixed(2));
       const linkedValues = normalizeLinkedFieldValues({ ph: next }, 'ph', fieldKey);
-      moistureTargetRef.current = linkedValues.moisture ?? moistureTargetRef.current;
-      moistureDisplayRef.current = linkedValues.moisture ?? moistureDisplayRef.current;
       setLivePatch(linkedValues);
-      scheduleFieldPatch({ ph: next });
+      scheduleFieldPatch(linkedValues);
     };
     const setWaterLevelFromPointer = (clientY) => {
       if (!waterLevelRef.current) return;
       const rect = waterLevelRef.current.getBoundingClientRect();
       const pct = clamp((rect.bottom - clientY) / rect.height, 0, 1);
       const next = Number((pct * 30).toFixed(1));
-      const linkedValues = normalizeLinkedFieldValues({ wl: next }, 'wl', fieldKey);
-      moistureTargetRef.current = linkedValues.moisture;
-      moistureDisplayRef.current = linkedValues.moisture;
-      setLivePatch(linkedValues);
+      setLivePatch({ wl: next });
       scheduleFieldPatch({ wl: next });
     };
     const setNpkFromPointer = (key, clientX) => {
@@ -1627,8 +1744,10 @@ const AgricultureDashboard = () => {
     };
 
     useEffect(() => {
+      const isMoistureEditLocked = Date.now() < moistureEditLockUntilRef.current;
       if ((!activeDragRef.current || activeDragRef.current.type !== 'moisture') 
-          && !activeEditFieldsRef.current[fieldKey]) {
+          && !activeEditFieldsRef.current[fieldKey]
+          && !isMoistureEditLocked) {
         moistureDisplayRef.current = moistureValue;
         moistureTargetRef.current = moistureValue;
       }
@@ -1639,6 +1758,7 @@ const AgricultureDashboard = () => {
         if (livePatchFrameRef.current !== null) {
           window.cancelAnimationFrame(livePatchFrameRef.current);
         }
+        clearMoistureEditReleaseTimer();
         stopMoistureAnimation();
         endDrag();
         unbindGlobalDragListeners();
@@ -2919,7 +3039,7 @@ const AgricultureDashboard = () => {
                   <div
                     className="gh-panel-icon"
                     style={{ background: fanOn ? 'linear-gradient(180deg, #f0fdf4 0%, #dcfce7 100%)' : 'linear-gradient(180deg, #ffffff 0%, #eef3f8 100%)', boxShadow: fanOn ? '0 6px 16px rgba(13, 148, 136, 0.16)' : 'inset 0 1px 0 rgba(255,255,255,0.9)', cursor: 'pointer' }}
-                    title="Fan turns on automatically when temperature is above 40 and humidity is above 70"
+                    title="Fan turns on automatically when temperature is above 25"
                     >
                       <svg width="36" height="36" viewBox="0 0 36 36" className={fanOn ? fanSpeedClass : 'spin-stop'}>
                       <path d="M18 18C18 9.8 26.6 7.1 28.5 12.6C30 17.1 24.3 19.4 18 18Z" fill="#0d9488" opacity="0.9"/>

@@ -1,0 +1,25 @@
+#include <TFT_eSPI.h>
+#include "image.h"   // your converted image
+
+TFT_eSPI tft = TFT_eSPI();
+
+#define IMG_W 240   // match your converted image
+#define IMG_H 280
+
+
+
+void setup() {
+  tft.init();
+  tft.setRotation(0);
+
+  // Fix color issue if needed
+  tft.setSwapBytes(true);
+
+  tft.fillScreen(TFT_BLACK);
+
+  // Draw image
+  tft.pushImage(0, 0, IMG_W, IMG_H, image);
+}
+
+void loop() {
+}

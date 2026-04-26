@@ -213,31 +213,24 @@ void handleData() {////////////////////////for field esp only///////////////////
 
   // temperature
   if (server.hasArg("temp")) {
-    temperature = server.arg("temp").toInt();
+    temperature = server.arg("temp").toFloat();
+    fan_on = (temperature > 25.0);
     Serial.print("Temperature: ");
     Serial.println(temperature);
+    Serial.print("Fan: ");
+    Serial.println(fan_on ? "ON" : "OFF");
     response += "Temperature OK | ";
   }
   //humidity
   if (server.hasArg("humid")) {
-    humidity = server.arg("humid").toInt();
+    humidity = server.arg("humid").toFloat();
     Serial.print("Humidity: ");
     Serial.println(humidity);
     response += "Humidity OK | ";
   }
   //fan
   if (server.hasArg("fan")) {
-    String fan = server.arg("fan");
-    if (fan == "on") {
-      fan_on = true;
-      Serial.println("Fan ON");
-      response += "Fan ON | ";
-    } 
-    else if (fan == "off") {
-      fan_on = false;
-      Serial.println("Fan OFF");
-      response += "Fan OFF | ";
-    }
+    response += "Fan Auto | ";
   }
 
   // FINAL RESPONSE (ONLY ONCE)
