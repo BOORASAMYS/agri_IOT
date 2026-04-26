@@ -30,6 +30,7 @@ WL_PH_FIX_DRAIN_TARGET = 12.0    # water level (cm) to drain to in pH-fix mode (
 WL_PH_FIX_IRRIGATE_UNTIL = 18.0  # water level (cm) to irrigate to after pH reset (60% of 30cm)
 MAIN_TANK_REFILL_START_PERCENT = 20.0
 GREENHOUSE_FAN_TEMP_THRESHOLD = 25.0
+GREENHOUSE_FAN_HUMIDITY_THRESHOLD = 25.0
 GREENHOUSE_TEMP_MIN = 20.0
 GREENHOUSE_TEMP_OFF_STEP_PER_TICK = 0.5
 AUTOMATION_GREENHOUSE_ALERT_INTERVAL_SECONDS = 120.0
@@ -58,8 +59,8 @@ DEFAULT_STATE = {
         "mainTankManualOverride": None,
         "flowRate": 0.0,
         "gh": {
-            "temp": 25.0,
-            "humidity": 35.0,
+            "temp": 35.0,
+            "humidity": 65.0,
             "fireAlert": False,
             "fireSensor": {
                 "detected": False,
@@ -201,13 +202,9 @@ def apply_field_ph_condition(field_key, field):
 def normalize_linked_field_values(field_patch, preferred_source=None, field_key=None):
     normalized_patch = dict(field_patch or {})
     if "moisture" in normalized_patch:
-        normalized_patch["moisture"] = round(max(0.0, min(100.0, number_from_value(normalized_patch["moisture"], 0.0))), 1)
+        normalized_patch["moisture"] = max(0.0, min(100.0, number_from_value(normalized_patch["moisture"], 0.0)))
     if "wl" in normalized_patch:
-        normalized_patch["wl"] = round(max(0.0, min(30.0, number_from_value(normalized_patch["wl"], 0.0))), 1)
-    if preferred_source == "moisture" and "moisture" in normalized_patch:
-        normalized_patch["wl"] = moisture_to_water_level(normalized_patch["moisture"])
-    if preferred_source == "wl" and "wl" in normalized_patch:
-        normalized_patch["moisture"] = water_level_to_moisture(normalized_patch["wl"])
+        normalized_patch["wl"] = max(0.0, min(100.0, number_from_value(normalized_patch["wl"], 0.0)))
     if "ph" in normalized_patch:
         normalized_patch["ph"] = round(max(0.0, min(14.0, number_from_value(normalized_patch["ph"], IRRIGATION_PH_TARGET))), 2)
 
@@ -235,12 +232,6 @@ def is_ph_out_of_range(ph):
     return normalized_ph < IRRIGATION_LOW_PH_THRESHOLD or normalized_ph > IRRIGATION_HIGH_PH_THRESHOLD
 
 
-def is_irrigation_blocked_by_ph(field_key, field):
-    if field_key not in FIELD_KEYS_WITH_PH_CONDITION:
-        return False
-    return is_ph_out_of_range(field.get("ph"))
-
-
 def should_field_drain(field):
     moisture = number_from_value(field.get("moisture"), 0.0)
     ph = number_from_value(field.get("ph"), IRRIGATION_PH_TARGET)
@@ -250,20 +241,6 @@ def should_field_drain(field):
 def has_reached_drain_cutoff(field):
     water_level = number_from_value(field.get("wl"), 0.0)
     return water_level <= WL_PH_FIX_DRAIN_TARGET
-
-
-def is_post_drain_recovery_state(field_key, field):
-    if field_key not in {"f1", "f2"}:
-        return False
-    moisture = number_from_value(field.get("moisture"), 0.0)
-    water_level = number_from_value(field.get("wl"), 0.0)
-    ph = number_from_value(field.get("ph"), IRRIGATION_PH_TARGET)
-    ph_in_range = IRRIGATION_LOW_PH_THRESHOLD <= ph <= IRRIGATION_HIGH_PH_THRESHOLD
-    return (
-        ph_in_range
-        and water_level <= WL_PH_FIX_DRAIN_TARGET
-        and 40.0 <= moisture < IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD
-    )
 
 
 def move_ph_toward_target(ph, target=IRRIGATION_PH_TARGET):
@@ -280,22 +257,14 @@ def resolve_auto_irrigation(field_key, field, currently_irrigating=False):
     ph = number_from_value(field.get("ph"), IRRIGATION_PH_TARGET)
     ph_in_range = IRRIGATION_LOW_PH_THRESHOLD <= ph <= IRRIGATION_HIGH_PH_THRESHOLD
 
-    # Always OFF when moisture > 60%
-    if moisture >= IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD:
+    if moisture > IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD:
         return False, None
-
-    # pH condition only applies to f1 and f2, not f3
-    if field_key in FIELD_KEYS_WITH_PH_CONDITION and not ph_in_range:
+    if not ph_in_range:
         return False, None
-
-    # Keep irrigating if already running and moisture hasn't reached OFF threshold yet
     if bool_from_value(currently_irrigating) and moisture < IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD:
         return True, "moisture"
-
-    # Start irrigation only when moisture drops below ON threshold (30%)
-    if moisture < IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD:
+    if moisture < IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD and ph_in_range:
         return True, "moisture"
-
     return False, None
 
 
@@ -462,14 +431,15 @@ def resolve_automation_field_mode(field_key, field, now=None, ph_just_reset=Fals
         if water_level > WL_PH_FIX_DRAIN_TARGET:
             return "drain"
         # Phase 2: wl at/below 12cm → irrigate until moisture reaches 60%
-        if 40.0 <= moisture < IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD:
+        if moisture < IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD:
             return "irrigation"
         return "idle"
 
     # After pH fix OR pH just reset: Allow irrigation in recovery zone (30-60%)
     # Detect if we're in post-pH-reset state: wl is low (12 or below) and ph is normal
-    in_ph_recovery = ph_just_reset or (ph_in_range and water_level <= WL_PH_FIX_DRAIN_TARGET and 40.0 <= moisture < IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD)
+    in_ph_recovery = ph_just_reset or (ph_in_range and water_level <= WL_PH_FIX_DRAIN_TARGET and moisture < IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD)
     if in_ph_recovery:
+        # In recovery mode: moisture < 60% → irrigate
         return "irrigation"
 
     # For f3: No pH condition required
@@ -485,6 +455,8 @@ def resolve_automation_field_mode(field_key, field, now=None, ph_just_reset=Fals
     if moisture >= IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD:
         return "idle"
     if moisture < IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD:
+        return "irrigation"
+    if moisture < 50.0:  # Zone 30-50%: allow turning ON
         return "irrigation"
     if was_irrigating and moisture < IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD:  # Zone 50-60%: maintain state
         return "irrigation"
@@ -544,14 +516,17 @@ def get_irrigation_moisture_target(field_key, field, now):
     return round(max(current_moisture, min(target_moisture, planned_moisture)), 1)
 
 
-def apply_greenhouse_rules(state):
+def apply_greenhouse_rules(state, force_fan_on=False):
     greenhouse = state.get("state", {}).get("gh")
     if not isinstance(greenhouse, dict):
         return state
 
     temp = number_from_value(greenhouse.get("temp"), GREENHOUSE_FAN_TEMP_THRESHOLD)
-    # Fan is controlled by temperature only: ON when temp > 25, otherwise OFF.
-    greenhouse["fanOn"] = temp > GREENHOUSE_FAN_TEMP_THRESHOLD
+    humidity = number_from_value(greenhouse.get("humidity"), GREENHOUSE_FAN_HUMIDITY_THRESHOLD)
+    greenhouse["fanOn"] = force_fan_on or (
+        temp > GREENHOUSE_FAN_TEMP_THRESHOLD
+        and humidity > GREENHOUSE_FAN_HUMIDITY_THRESHOLD
+    )
     return state
 
 
@@ -600,9 +575,6 @@ def save_state(force=False):
     os.replace(STATE_FILE_TMP, STATE_FILE)
     LAST_SAVED_STATE = serialized_state
     return True
-
-
-save_state(force=True)
 
 
 def reset_state_for_shutdown():
@@ -922,10 +894,8 @@ def update_current(patch, connected=None, last_error=None, field_metadata=None):
         automation_enabled = bool_from_value(merged.get("automationEnabled"))
         automation_reset_active = automation_enabled and is_automation_reset_active(now)
 
-        # Always recompute fanOn from temperature only (temp > 25 → ON, else → OFF)
-        # This ensures the fan rule is enforced even if the patch includes a stale fanOn value
-        current_temp = number_from_value(merged["state"]["gh"].get("temp"), 0.0)
-        merged["state"]["gh"]["fanOn"] = current_temp > GREENHOUSE_FAN_TEMP_THRESHOLD
+        if "fanOn" in greenhouse_patch:
+            merged["state"]["gh"]["fanOn"] = bool_from_value(greenhouse_patch.get("fanOn"))
 
         for field_key in FIELD_KEYS:
             field = merged["state"][field_key]
@@ -934,8 +904,7 @@ def update_current(patch, connected=None, last_error=None, field_metadata=None):
             sensor_update_present = any(key in field_patch for key in ("moisture", "wl", "ph", "n", "p", "k"))
 
             if sensor_update_present:
-                preferred_source = "moisture" if "moisture" in field_patch else "wl" if "wl" in field_patch else "ph" if "ph" in field_patch else None
-                normalized_field_patch = normalize_linked_field_values(field_patch, preferred_source=preferred_source, field_key=field_key)
+                normalized_field_patch = normalize_linked_field_values(field_patch, field_key=field_key)
                 if normalized_field_patch != field_patch:
                     field.update(normalized_field_patch)
                     field_patch = normalized_field_patch
@@ -955,16 +924,6 @@ def update_current(patch, connected=None, last_error=None, field_metadata=None):
                 MANUAL_IRRIGATION_OVERRIDES[field_key] = None
 
             if "moisture" in field_patch:
-                clear_irrigation_run(field_key)
-                if is_post_drain_recovery_state(field_key, field):
-                    current_moisture = number_from_value(field.get("moisture"), 0.0)
-                    field["irrigation"] = 40.0 <= current_moisture < IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD
-                    field["drain"] = False
-                    field["mix"] = False
-
-            if is_irrigation_blocked_by_ph(field_key, field):
-                MANUAL_IRRIGATION_OVERRIDES[field_key] = None
-                field["irrigation"] = False
                 clear_irrigation_run(field_key)
 
             if metadata.get("manual_irrigation_control") and "irrigation" in field_patch:
@@ -994,19 +953,11 @@ def update_current(patch, connected=None, last_error=None, field_metadata=None):
                 manual_requested = bool_from_value(field.get("irrigation")) and desired_auto_reason is None
                 field["drain"] = automation_mode == "drain"
                 auto_irrigation_requested = automation_mode == "irrigation"
-                current_moisture = number_from_value(field.get("moisture"), 0.0)
-                ph_out_of_range = is_irrigation_blocked_by_ph(field_key, field)
-                keep_running_until_cutoff = (
-                    bool_from_value(field.get("irrigation"))
-                    and current_moisture < IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD
-                )
 
-                if ph_out_of_range:
-                    field["irrigation"] = False
-                elif isinstance(manual_override, bool):
+                if isinstance(manual_override, bool):
                     field["irrigation"] = auto_irrigation_requested or manual_override
                 elif sensor_update_present:
-                    field["irrigation"] = auto_irrigation_requested or keep_running_until_cutoff
+                    field["irrigation"] = auto_irrigation_requested
                 else:
                     field["irrigation"] = auto_irrigation_requested or manual_requested
 
@@ -1054,18 +1005,9 @@ def simulation_loop():
             greenhouse_pulse_active = automation_enabled and is_automation_greenhouse_alert_active(now)
             greenhouse = CURRENT.get("state", {}).get("gh")
             active_irrigation_count = 0
-            if isinstance(greenhouse, dict):
-                if bool_from_value(greenhouse.get("fanOn")):
-                    current_temp = number_from_value(greenhouse.get("temp"), GREENHOUSE_TEMP_MIN)
-                    cooled_temp = round(max(GREENHOUSE_TEMP_MIN, current_temp - GREENHOUSE_TEMP_OFF_STEP_PER_TICK), 1)
-                    if current_temp > GREENHOUSE_FAN_TEMP_THRESHOLD and cooled_temp < GREENHOUSE_FAN_TEMP_THRESHOLD:
-                        cooled_temp = GREENHOUSE_FAN_TEMP_THRESHOLD
-                    if cooled_temp != current_temp:
-                        greenhouse["temp"] = cooled_temp
-                        dirty = True
-
+            if automation_enabled and isinstance(greenhouse, dict):
                 previous_fan_on = bool_from_value(greenhouse.get("fanOn"))
-                apply_greenhouse_rules(CURRENT)
+                apply_greenhouse_rules(CURRENT, force_fan_on=greenhouse_pulse_active)
                 if bool_from_value(greenhouse.get("fanOn")) != previous_fan_on:
                     dirty = True
 
@@ -1076,7 +1018,7 @@ def simulation_loop():
 
                 if automation_reset_active:
                     if bool_from_value(field.get("irrigation")):
-                        field["irrigation"] = next_moisture < IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD
+                        field["irrigation"] = False
                         dirty = True
                     if bool_from_value(field.get("drain")):
                         field["drain"] = False
@@ -1088,14 +1030,9 @@ def simulation_loop():
 
                 if bool_from_value(field.get("drain")):
                     current_water_level = number_from_value(field.get("wl"), 0.0)
-                    current_moisture = number_from_value(field.get("moisture"), 0.0)
                     next_water_level = round(max(0.0, current_water_level - AUTOMATION_CYCLE_MOISTURE_DRAIN_PER_TICK), 1)
                     if next_water_level != current_water_level:
                         field["wl"] = next_water_level
-                        dirty = True
-                    next_moisture = water_level_to_moisture(next_water_level)
-                    if next_moisture != current_moisture:
-                        field["moisture"] = next_moisture
                         dirty = True
                     # When wl reaches drain target in pH-fix mode → reset pH to 7
                     ph = number_from_value(field.get("ph"), IRRIGATION_PH_TARGET)
@@ -1104,18 +1041,13 @@ def simulation_loop():
                         field.update(get_ph_chemical_state(IRRIGATION_PH_TARGET))
                         ph_was_just_reset = True  # ← Track that pH was just reset
                         dirty = True
-                        # pH just reset → stop drain, but leave recovery irrigation user-driven
-                        field["drain"] = False
-                        field["mix"] = False
-                        field["irrigation"] = next_moisture < IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD
-                        dirty = True
-
-                if is_irrigation_blocked_by_ph(field_key, field):
-                    if bool_from_value(field.get("irrigation")):
-                        field["irrigation"] = False
-                        dirty = True
-                    MANUAL_IRRIGATION_OVERRIDES[field_key] = None
-                    clear_irrigation_run(field_key)
+                        # pH just reset → stop drain and start irrigation if moisture < 60%
+                        current_moisture = number_from_value(field.get("moisture"), 0.0)
+                        if current_moisture < IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD:
+                            field["drain"] = False
+                            field["mix"] = False
+                            field["irrigation"] = True
+                            dirty = True
 
                 if field.get("irrigation"):
                     active_irrigation_count += 1
@@ -1131,6 +1063,7 @@ def simulation_loop():
                         MANUAL_IRRIGATION_OVERRIDES[field_key] = None
                         clear_irrigation_run(field_key)
                         dirty = True
+                    # Also increment water level when irrigating
                     next_wl = round(min(30.0, current_wl + 0.5), 1)
                     if next_wl != current_wl:
                         field["wl"] = next_wl
@@ -1171,18 +1104,10 @@ def simulation_loop():
                     manual_override = MANUAL_IRRIGATION_OVERRIDES[field_key]
                     manual_requested = IRRIGATION_RUNS[field_key]["reason"] == "manual" and bool_from_value(field.get("irrigation"))
                     auto_irrigation_requested = automation_mode == "irrigation"
-                    current_moisture = number_from_value(field.get("moisture"), 0.0)
-                    ph_out_of_range = is_irrigation_blocked_by_ph(field_key, field)
-                    keep_running_until_cutoff = (
-                        bool_from_value(field.get("irrigation"))
-                        and current_moisture < IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD
-                    )
-                    if ph_out_of_range:
-                        should_irrigate = False
-                    elif isinstance(manual_override, bool):
+                    if isinstance(manual_override, bool):
                         should_irrigate = auto_irrigation_requested or manual_override
                     else:
-                        should_irrigate = auto_irrigation_requested or manual_requested or keep_running_until_cutoff
+                        should_irrigate = auto_irrigation_requested or manual_requested
 
                 if bool_from_value(field.get("irrigation")) != should_irrigate:
                     field["irrigation"] = should_irrigate
@@ -1216,7 +1141,7 @@ def simulation_loop():
                     dirty = True
 
             if dirty:
-                apply_greenhouse_rules(CURRENT)
+                apply_greenhouse_rules(CURRENT, force_fan_on=greenhouse_pulse_active)
                 if automation_reset_active:
                     CURRENT["state"]["pumping"] = False
                     CURRENT["state"]["mainTankManualOverride"] = False
@@ -1428,4 +1353,3 @@ if __name__ == "__main__":
         print("\nManual shutdown detected. Resetting backend state to zero and switching irrigation off.")
         reset_state_for_shutdown()
         server.server_close()
-
