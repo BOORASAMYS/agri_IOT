@@ -1124,7 +1124,9 @@ def get_esp_payload_from_state(esp_num):
         #    (i.e. drain just finished and pH was reset). Regular irrigation
         #    cycles (not preceded by a drain) do NOT turn the yellow light on.
         ph_alert = ph_value < 4 or ph_value > 10
-        post_drain_irrigation = _update_yellow_tracker("f1", drain_on, irrigation_on)
+        ph = number_from_value(field["ph"], 7.0)
+        is_ph_fix_drain = drain_on and (ph < 4 or ph > 10)
+        post_drain_irrigation = _update_yellow_tracker("f1", is_ph_fix_drain, irrigation_on)
         yellow_on = ph_alert or post_drain_irrigation
         return {
             "level": round(field["wl"], 1),
@@ -1141,7 +1143,9 @@ def get_esp_payload_from_state(esp_num):
         drain_on = bool(field["drain"])
         ph_value = number_from_value(field["ph"], 7.0)
         ph_alert = ph_value < 4 or ph_value > 10
-        post_drain_irrigation = _update_yellow_tracker("f2", drain_on, irrigation_on)
+        ph = number_from_value(field["ph"], 7.0)
+        is_ph_fix_drain = drain_on and (ph < 4 or ph > 10)
+        post_drain_irrigation = _update_yellow_tracker("f2", is_ph_fix_drain, irrigation_on)
         yellow_on = ph_alert or post_drain_irrigation
         return {
             "level": round(field["wl"], 1),
@@ -1158,7 +1162,9 @@ def get_esp_payload_from_state(esp_num):
         drain_on = bool(field["drain"])
         ph_value = number_from_value(field["ph"], 7.0)
         ph_alert = ph_value < 4 or ph_value > 10
-        post_drain_irrigation = _update_yellow_tracker("f3", drain_on, irrigation_on)
+        ph = number_from_value(field["ph"], 7.0)
+        is_ph_fix_drain = drain_on and (ph < 4 or ph > 10)
+        post_drain_irrigation = _update_yellow_tracker("f3", is_ph_fix_drain, irrigation_on)
         yellow_on = ph_alert or post_drain_irrigation
         return {
             "level": round(field["wl"], 1),

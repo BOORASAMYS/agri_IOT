@@ -12,6 +12,7 @@ from urllib.request import Request, urlopen
 HOST = "0.0.0.0"
 PORT = 8000
 REQUEST_TIMEOUT = 4
+IRRIGATION_AUTO_DRAIN_TO_MOISTURE = 25.0
 STATUS_REQUEST_TIMEOUT = 1.5
 STATUS_CACHE_TTL_SECONDS = 0.4
 STATE_FILE = os.path.join(os.path.dirname(__file__), "esp32_state.json")
@@ -33,7 +34,7 @@ GREENHOUSE_FAN_TEMP_THRESHOLD = 25.0
 GREENHOUSE_TEMP_MIN = 20.0
 GREENHOUSE_TEMP_OFF_STEP_PER_TICK = 0.5
 AUTOMATION_GREENHOUSE_ALERT_INTERVAL_SECONDS = 120.0
-AUTOMATION_GREENHOUSE_ALERT_DURATION_SECONDS = 5.0
+AUTOMATION_GREENHOUSE_ALERT_DURATION_SECONDS = 15.0
 SIMULATION_TICK_SECONDS = 1.2
 MOISTURE_AUTO_IRRIGATION_DURATION_SECONDS = 120.0
 AUTOMATION_STARTUP_RESET_SECONDS = 5.0
@@ -467,7 +468,7 @@ def set_automation_enabled(enabled):
         return deepcopy(CURRENT)
 
 
-def resolve_automation_field_mode(field_key, field, now=None, ph_just_reset=False):
+def resolve_automation_field_mode(field_key, field, now=None, ph_just_reset=False, automation_enabled=False):
     moisture = number_from_value(field.get("moisture"), 0.0)
     water_level = number_from_value(field.get("wl"), 0.0)
     ph = number_from_value(field.get("ph"), IRRIGATION_PH_TARGET)
@@ -503,11 +504,21 @@ def resolve_automation_field_mode(field_key, field, now=None, ph_just_reset=Fals
     # - Zone 30-50%: Allow turning ON even if not previously on (after pH reset)
     # - Zone 50-60%: Maintain current state (hysteresis)
     if moisture >= IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD:
+        # Only drain back to 35% when automation is actively running
+        if automation_enabled:
+            return "drain"
         return "idle"
+
     if moisture < IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD:
         return "irrigation"
-    if was_irrigating and moisture < IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD:  # Zone 50-60%: maintain state
+
+    # 35–60% zone: hold current state
+    if was_irrigating and moisture < IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD:
         return "irrigation"
+    # Only hold drain state during automation (draining back to 35%)
+    if automation_enabled and was_draining and moisture > IRRIGATION_AUTO_ON_MOISTURE_THRESHOLD:
+        return "drain"
+
     return "idle"
 
 
@@ -1048,7 +1059,7 @@ def update_current(patch, connected=None, last_error=None, field_metadata=None):
                     field["drain"] = False
                     PH_RECOVERY_READY_AT[field_key] = None
                 else:
-                    automation_mode = resolve_automation_field_mode(field_key, field, now=now)
+                    automation_mode = resolve_automation_field_mode(field_key, field, now=now,automation_enabled=True)
                     desired_auto_reason = "moisture" if automation_mode == "irrigation" else None
                     field["drain"] = automation_mode == "drain"
                     field["irrigation"] = automation_mode == "irrigation"
@@ -1141,7 +1152,7 @@ def simulation_loop():
 
                 if automation_reset_active:
                     if bool_from_value(field.get("irrigation")):
-                        field["irrigation"] = next_moisture < IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD
+                        field["irrigation"] = False
                         dirty = True
                     if bool_from_value(field.get("drain")):
                         field["drain"] = False
@@ -1157,22 +1168,36 @@ def simulation_loop():
                     next_water_level = round(max(0.0, current_water_level - AUTOMATION_CYCLE_MOISTURE_DRAIN_PER_TICK), 1)
                     if next_water_level != current_water_level:
                         field["wl"] = next_water_level
-                        # Sync moisture to new water level (30cm WL = 100% moisture, 0cm = 0%)
                         field["moisture"] = water_level_to_moisture(next_water_level)
                         dirty = True
-                    # Recalculate next_moisture based on new WL to ensure consistency
                     next_moisture = water_level_to_moisture(field.get("wl", 0.0))
                     if next_moisture != current_moisture:
                         field["moisture"] = next_moisture
                         dirty = True
-                    # When wl reaches drain target in pH-fix mode → reset pH to 7
+
+                    # Automation cycle drain: stop at 35% and flip back to irrigation.
+                    # Only runs when automation is ON — manual mode never auto-flips drain.
+                    if automation_enabled:
+                        ph = number_from_value(field.get("ph"), IRRIGATION_PH_TARGET)
+                        is_ph_fix_drain = (
+                            (ph < IRRIGATION_LOW_PH_THRESHOLD or ph > IRRIGATION_HIGH_PH_THRESHOLD)
+                            and field_key in {"f1", "f2"}
+                        )
+                        if not is_ph_fix_drain and next_moisture <= IRRIGATION_AUTO_DRAIN_TO_MOISTURE:
+                            field["drain"] = False
+                            field["irrigation"] = True
+                            clear_irrigation_run(field_key)
+                            set_irrigation_run(field_key, "moisture", field)
+                            dirty = True
+                            continue
+
+                    # pH-fix drain: when wl reaches drain target and pH is out of range → reset pH to 7
                     ph = number_from_value(field.get("ph"), IRRIGATION_PH_TARGET)
                     if next_water_level <= WL_PH_FIX_DRAIN_TARGET and (ph < IRRIGATION_LOW_PH_THRESHOLD or ph > IRRIGATION_HIGH_PH_THRESHOLD):
                         field["ph"] = IRRIGATION_PH_TARGET
                         field.update(get_ph_chemical_state(IRRIGATION_PH_TARGET))
-                        ph_was_just_reset = True  # ← Track that pH was just reset
+                        ph_was_just_reset = True
                         dirty = True
-                        # pH just reset → stop drain, but leave recovery irrigation user-driven
                         field["drain"] = False
                         field["mix"] = False
                         field["irrigation"] = next_moisture < IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD
@@ -1193,7 +1218,6 @@ def simulation_loop():
                         next_moisture = round(min(IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD, current_moisture + AUTOMATION_CYCLE_MOISTURE_RISE_PER_TICK), 1)
                         if next_moisture != current_moisture:
                             field["moisture"] = next_moisture
-                            # Sync WL to new moisture value (100% moisture = 30cm WL)
                             field["wl"] = moisture_to_water_level(next_moisture)
                             dirty = True
                     else:
@@ -1201,7 +1225,6 @@ def simulation_loop():
                         MANUAL_IRRIGATION_OVERRIDES[field_key] = None
                         clear_irrigation_run(field_key)
                         dirty = True
-                    # Ensure WL is synced with moisture (30cm max corresponds to 100% moisture)
                     next_wl = min(30.0, moisture_to_water_level(field.get("moisture", 0.0)))
                     next_wl = round(next_wl, 1)
                     if next_wl != current_wl:
@@ -1228,14 +1251,14 @@ def simulation_loop():
                     apply_field_ph_condition(field_key, field)
 
                 if automation_enabled:
-                    automation_mode = resolve_automation_field_mode(field_key, field, now=now, ph_just_reset=ph_was_just_reset)
+                    automation_mode = resolve_automation_field_mode(field_key, field, now=now, ph_just_reset=ph_was_just_reset, automation_enabled=True)
                     desired_auto_reason = "moisture" if automation_mode == "irrigation" else None
                     if bool_from_value(field.get("drain")) != (automation_mode == "drain"):
                         field["drain"] = automation_mode == "drain"
                         dirty = True
                     should_irrigate = automation_mode == "irrigation"
                 else:
-                    automation_mode = resolve_automation_field_mode(field_key, field, now=now, ph_just_reset=ph_was_just_reset)
+                    automation_mode = resolve_automation_field_mode(field_key, field, now=now, ph_just_reset=ph_was_just_reset, automation_enabled=False)
                     desired_auto_reason = "moisture" if automation_mode == "irrigation" else None
                     if bool_from_value(field.get("drain")) != (automation_mode == "drain"):
                         field["drain"] = automation_mode == "drain"
@@ -1296,7 +1319,6 @@ def simulation_loop():
                 else:
                     CURRENT["state"]["pumping"] = resolve_main_tank_pumping(CURRENT)
                 save_state()
-
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
