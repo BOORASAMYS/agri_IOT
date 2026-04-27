@@ -54,7 +54,7 @@ DEFAULT_STATE = {
             "lastUpdatedAt": None,
             "error": "Main tank sensor not initialized",
         },
-        "pumping": False,
+        "pumping": True,
         "mainTankManualOverride": None,
         "flowRate": 0.0,
         "gh": {
@@ -168,13 +168,17 @@ def number_from_value(value, fallback):
 
 
 def moisture_to_water_level(moisture):
+    # 100% moisture = 30cm water level; 0% = 0cm
     normalized_moisture = max(0.0, min(100.0, number_from_value(moisture, 0.0)))
-    return round((normalized_moisture / 100.0) * 30.0, 1)
+    water_level = (normalized_moisture / 100.0) * 30.0
+    return round(water_level, 1)
 
 
 def water_level_to_moisture(water_level):
+    # 30cm water level = 100% moisture; 0cm = 0%
     normalized_water_level = max(0.0, min(30.0, number_from_value(water_level, 0.0)))
-    return round((normalized_water_level / 30.0) * 100.0, 1)
+    moisture = (normalized_water_level / 30.0) * 100.0
+    return round(moisture, 1)
 
 
 def moisture_to_ph(moisture):
@@ -200,17 +204,30 @@ def apply_field_ph_condition(field_key, field):
 
 def normalize_linked_field_values(field_patch, preferred_source=None, field_key=None):
     normalized_patch = dict(field_patch or {})
+    
+    # Normalize moisture to 0-100 range
     if "moisture" in normalized_patch:
         normalized_patch["moisture"] = round(max(0.0, min(100.0, number_from_value(normalized_patch["moisture"], 0.0))), 1)
+    
+    # Normalize water level to 0-30cm range
     if "wl" in normalized_patch:
         normalized_patch["wl"] = round(max(0.0, min(30.0, number_from_value(normalized_patch["wl"], 0.0))), 1)
+    
+    # Sync moisture to water level (100% moisture = 30cm, 0% = 0cm)
     if preferred_source == "moisture" and "moisture" in normalized_patch:
         normalized_patch["wl"] = moisture_to_water_level(normalized_patch["moisture"])
-    if preferred_source == "wl" and "wl" in normalized_patch:
+    # Sync water level to moisture (30cm = 100%, 0cm = 0%)
+    elif preferred_source == "wl" and "wl" in normalized_patch:
         normalized_patch["moisture"] = water_level_to_moisture(normalized_patch["wl"])
+    # If both present and no preference, ensure they're synchronized (moisture takes priority)
+    elif "moisture" in normalized_patch and "wl" in normalized_patch:
+        normalized_patch["wl"] = moisture_to_water_level(normalized_patch["moisture"])
+    
+    # Normalize pH to 0-14 range
     if "ph" in normalized_patch:
         normalized_patch["ph"] = round(max(0.0, min(14.0, number_from_value(normalized_patch["ph"], IRRIGATION_PH_TARGET))), 2)
 
+    # Apply pH-based chemical state (acid/base indicators) for fields f1 and f2 only
     if "ph" in normalized_patch:
         apply_field_ph_condition(field_key, normalized_patch)
 
@@ -299,7 +316,7 @@ def resolve_auto_irrigation(field_key, field, currently_irrigating=False):
     return False, None
 
 
-def should_main_tank_pump(tank, was_pumping=False):
+def should_main_tank_pump(tank, was_pumping=True):
     normalized_tank = number_from_value(tank, 0.0)
     if normalized_tank >= MAIN_TANK_STOP_PERCENT:
         return False
@@ -311,21 +328,20 @@ def should_main_tank_pump(tank, was_pumping=False):
 def resolve_main_tank_pumping(state):
     state_values = state.get("state", {}) if isinstance(state, dict) else {}
     tank = number_from_value(state_values.get("tank"), 0.0)
+    manual_override = state_values.get("mainTankManualOverride")
 
-    # The automatic tank limits always win: at or below 20% the pump must run,
-    # and at 100% it must stop. Manual override only applies between them.
+    # Boundary limits always win regardless of user override
     if tank <= MAIN_TANK_REFILL_START_PERCENT:
         return True
     if tank >= MAIN_TANK_STOP_PERCENT:
         return False
 
-    manual_override = state_values.get("mainTankManualOverride")
+    # User manual override takes priority in the middle range
     if isinstance(manual_override, bool):
         return manual_override
-    return should_main_tank_pump(
-        tank,
-        state_values.get("pumping"),
-    )
+
+    # No override — default to ON (pump active by default)
+    return should_main_tank_pump(tank, state_values.get("pumping", True))
 
 
 def should_auto_irrigate(field_key, field):
@@ -394,11 +410,15 @@ def reset_state_for_automation_start(now=None):
         if not isinstance(field, dict):
             continue
 
-        for numeric_key in ("moisture", "ph", "wl", "n", "p", "k"):
+        for numeric_key in ("moisture", "wl", "n", "p", "k"):
             field[numeric_key] = 0.0
+            
+        field["ph"] = IRRIGATION_PH_TARGET
 
         for bool_key in ("irrigation", "drain", "acid", "base"):
             field[bool_key] = False
+
+        apply_field_ph_condition(field_key, field)
 
         LOW_MOISTURE_LATCHES[field_key] = False
         PH_CONTROL_LATCHES[field_key] = False
@@ -639,6 +659,43 @@ def reset_state_for_shutdown():
         save_state()
 
 
+def send_pump_off_commands(ip_address):
+    """
+    Send complete shutdown request to ESP32 using exact device format.
+    
+    Sends to f1 and f2: /set?level=0&pump=off&moisture=0&ph=7&status=irrigation&yellow=off
+    - level=0: Water level to zero
+    - pump=off: All pumps OFF
+    - moisture=0: Moisture sensor reset
+    - ph=7: pH reset to neutral
+    - status=irrigation: Normal status (not draining)
+    - yellow=off: Turn off yellow indicator light (field 1 and 2 only)
+    
+    This is called during /api/reset endpoint to ensure complete shutdown
+    with both local state reset and device communication.
+    """
+    try:
+        # Send shutdown commands with yellow=off to f1 and f2 only
+        for field_key in ("f1", "f2"):
+            try:
+                # Build complete shutdown request matching ESP32 format:
+                # /set?level=0&pump=off&moisture=0&ph=7&status=irrigation&yellow=off
+                query = urlencode({
+                    "level": "0",
+                    "pump": "off",
+                    "moisture": "0",
+                    "ph": "7",
+                    "status": "irrigation",
+                    "yellow": "off"
+                })
+                url = f"http://{ip_address}/set?{query}"
+                http_json(url, timeout=REQUEST_TIMEOUT)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 def normalize_ip(ip_value):
     ip_value = (ip_value or "").strip()
     if ip_value.startswith("http://"):
@@ -840,7 +897,8 @@ def normalize_field_body(field_key, body):
     current_field = CURRENT["state"][field_key]
 
     field_patch = {}
-    device_payload = {"field": field_key}
+    # device_payload uses exact ESP32 format: level, pump, moisture, ph, status, yellow
+    device_payload = {}
     metadata = {"manual_irrigation_control": False}
     moisture_updated = False
     water_level_updated = False
@@ -859,7 +917,6 @@ def normalize_field_body(field_key, body):
             continue
         value = number_from_value(incoming[source_key], current_field[target_key])
         field_patch[target_key] = value
-        device_payload[target_key] = value
         if target_key == "moisture":
             moisture_updated = True
         if target_key == "wl":
@@ -870,16 +927,13 @@ def normalize_field_body(field_key, body):
     preferred_source = "moisture" if moisture_updated else "wl" if water_level_updated else "ph" if ph_updated else None
     if preferred_source:
         field_patch = normalize_linked_field_values(field_patch, preferred_source=preferred_source, field_key=field_key)
-        for linked_key in ("moisture", "wl", "ph"):
-            if linked_key in field_patch:
-                device_payload[linked_key] = field_patch[linked_key]
+    
     manual_irrigation_control = bool_from_value(incoming.get("manualIrrigationControl"))
     sensor_update_present = bool(field_patch)
 
     incoming_status = str(incoming.get("status", "")).strip().lower()
     if incoming_status in {"drain", "irrigation"}:
         field_patch["drain"] = incoming_status == "drain"
-        device_payload["status"] = incoming_status
 
     for key in ("irrigation", "drain", "acid", "base"):
         if key not in incoming:
@@ -888,13 +942,18 @@ def normalize_field_body(field_key, body):
             continue
         value = bool_from_value(incoming[key])
         field_patch[key] = value
-        device_payload[key] = value
         if key == "irrigation" and manual_irrigation_control:
             metadata["manual_irrigation_control"] = True
 
-    if "drain" in field_patch:
-        device_payload["status"] = "drain" if field_patch["drain"] else "irrigation"
-
+    # Build device payload in ESP32 format
+    # Format: /set?level=XX&pump=on/off&moisture=XX&ph=X.X&status=irrigation/drain&yellow=on/off
+    device_payload["level"] = str(int(field_patch.get("wl", current_field.get("wl", 0))))
+    device_payload["pump"] = "on" if field_patch.get("irrigation", current_field.get("irrigation", False)) else "off"
+    device_payload["moisture"] = str(int(field_patch.get("moisture", current_field.get("moisture", 0))))
+    device_payload["ph"] = str(round(field_patch.get("ph", current_field.get("ph", 7.0)), 1))
+    device_payload["status"] = "drain" if field_patch.get("drain", current_field.get("drain", False)) else "irrigation"
+    device_payload["yellow"] = "off"  # Normal operation
+    
     return field_patch, device_payload, metadata
 
 
@@ -939,6 +998,12 @@ def update_current(patch, connected=None, last_error=None, field_metadata=None):
                 if normalized_field_patch != field_patch:
                     field.update(normalized_field_patch)
                     field_patch = normalized_field_patch
+                
+                # Ensure bidirectional sync: if moisture changed, update WL; if WL changed, update moisture
+                if "moisture" in field_patch and "wl" not in field_patch:
+                    field["wl"] = moisture_to_water_level(field_patch["moisture"])
+                elif "wl" in field_patch and "moisture" not in field_patch:
+                    field["moisture"] = water_level_to_moisture(field_patch["wl"])
 
             full_moisture_cutoff = number_from_value(field.get("moisture"), 0.0) > IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD
 
@@ -1092,8 +1157,11 @@ def simulation_loop():
                     next_water_level = round(max(0.0, current_water_level - AUTOMATION_CYCLE_MOISTURE_DRAIN_PER_TICK), 1)
                     if next_water_level != current_water_level:
                         field["wl"] = next_water_level
+                        # Sync moisture to new water level (30cm WL = 100% moisture, 0cm = 0%)
+                        field["moisture"] = water_level_to_moisture(next_water_level)
                         dirty = True
-                    next_moisture = water_level_to_moisture(next_water_level)
+                    # Recalculate next_moisture based on new WL to ensure consistency
+                    next_moisture = water_level_to_moisture(field.get("wl", 0.0))
                     if next_moisture != current_moisture:
                         field["moisture"] = next_moisture
                         dirty = True
@@ -1125,13 +1193,17 @@ def simulation_loop():
                         next_moisture = round(min(IRRIGATION_AUTO_OFF_MOISTURE_THRESHOLD, current_moisture + AUTOMATION_CYCLE_MOISTURE_RISE_PER_TICK), 1)
                         if next_moisture != current_moisture:
                             field["moisture"] = next_moisture
+                            # Sync WL to new moisture value (100% moisture = 30cm WL)
+                            field["wl"] = moisture_to_water_level(next_moisture)
                             dirty = True
                     else:
                         field["irrigation"] = False
                         MANUAL_IRRIGATION_OVERRIDES[field_key] = None
                         clear_irrigation_run(field_key)
                         dirty = True
-                    next_wl = round(min(30.0, current_wl + 0.5), 1)
+                    # Ensure WL is synced with moisture (30cm max corresponds to 100% moisture)
+                    next_wl = min(30.0, moisture_to_water_level(field.get("moisture", 0.0)))
+                    next_wl = round(next_wl, 1)
                     if next_wl != current_wl:
                         field["wl"] = next_wl
                         dirty = True
@@ -1411,6 +1483,28 @@ class Handler(BaseHTTPRequestHandler):
                 last_error=""
             )
             self.send_json({"ok": True, "dashboard": CURRENT})
+            return
+        # ------------------------------------------
+
+        # --- RESET ENDPOINT: Send complete shutdown command with yellow=on (system off indicator) ---
+        if parsed.path == "/api/reset":
+            try:
+                with STATE_LOCK:
+                    ip_address = CURRENT.get("deviceIp", "")
+
+                # Send shutdown commands to device: pump=off, yellow=on, all sensors zeroed
+                if ip_address:
+                    send_pump_off_commands(ip_address)
+
+                # Reset all local field states to zero with pumps OFF
+                reset_state_for_shutdown()
+
+                # Disable automation to prevent auto-recovery
+                CURRENT["automationEnabled"] = False
+
+                self.send_json({"ok": True, "message": "System reset - all pumps OFF, yellow=on sent", "dashboard": CURRENT})
+            except Exception as error:
+                self.send_json({"error": str(error), "dashboard": CURRENT}, status=500)
             return
         # ------------------------------------------
 

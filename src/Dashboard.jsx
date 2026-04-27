@@ -60,7 +60,7 @@ const ZERO_DASHBOARD_STATE = {
     lastUpdatedAt: null,
     error: '',
   },
-  pumping: false,
+  pumping: true,
   mainTankManualOverride: null,
   flowRate: 0,
   gh: {

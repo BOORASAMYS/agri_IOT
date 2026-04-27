@@ -19,7 +19,7 @@ const GREENHOUSE_FAN_TEMP_THRESHOLD = 40;
 const GREENHOUSE_FAN_HUMIDITY_THRESHOLD = 70;
 const MAIN_TANK_CAPACITY_ML = 500;
 const MAIN_TANK_REFILL_START_PERCENT = 20;
-const MAIN_TANK_FLOW_REDUCE_PERCENT = 80;
+const MAIN_TANK_FLOW_REDUCE_PERCENT = 100;
 const MAIN_TANK_FILL_TIME_MINUTES = 2;
 const AUTOMATION_TICK_MS = 1200;
 const STATUS_REFRESH_INTERVAL_MS = 500;
@@ -127,9 +127,10 @@ const normalizeLinkedFieldValues = (patch = {}) => {
   const next = {};
   if (patch.moisture !== undefined) {
     next.moisture = Math.max(0, Math.min(100, patch.moisture));
-  }
-  if (patch.wl !== undefined) {
+    next.wl = Number(((next.moisture / 100) * 30).toFixed(1));
+  } else if (patch.wl !== undefined) {
     next.wl = Math.max(0, Math.min(30, patch.wl));
+    next.moisture = Number(((next.wl / 30) * 100).toFixed(1));
   }
   if (patch.ph !== undefined) {
     next.ph = Math.max(0, Math.min(14, patch.ph));
